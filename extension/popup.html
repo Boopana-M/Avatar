@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      width: 280px;
+      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;
+      background-color: #121212;
+      color: #e0e0e0;
+      margin: 0;
+      padding: 16px;
+    }
+    h2 {
+      font-size: 16px;
+      color: #00adb5;
+      margin-top: 0;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    p {
+      font-size: 12px;
+      line-height: 1.5;
+      color: #a0a0a0;
+      margin-bottom: 12px;
+    }
+    .status-box {
+      background-color: #1e1e1e;
+      border: 1px solid #333333;
+      border-radius: 6px;
+      padding: 8px;
+      font-size: 11px;
+      margin-bottom: 12px;
+    }
+    .status-item {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    .status-item:last-child {
+      margin-bottom: 0;
+    }
+    .status-label {
+      color: #888888;
+    }
+    .status-val {
+      font-weight: bold;
+      color: #00ea11; /* Green status */
+    }
+    .instructions {
+      border-top: 1px solid #2a2a2a;
+      padding-top: 8px;
+    }
+    .instruction-step {
+      font-size: 11px;
+      color: #b0b0b0;
+      margin-bottom: 6px;
+    }
+    .footer {
+      font-size: 9px;
+      color: #555555;
+      text-align: center;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <h2>🤟 ISL Sign Avatar</h2>
+  <p>Overlay a real-time animated Indian Sign Language avatar synced with YouTube videos.</p>
+  
+  <div class="status-box">
+    <div class="status-item">
+      <span class="status-label">Extension Status:</span>
+      <span class="status-val" id="ext-status">Active</span>
+    </div>
+    <div class="status-item">
+      <span class="status-label">Backend Server:</span>
+      <span class="status-val" style="color: #00adb5;">http://localhost:8000</span>
+    </div>
+  </div>
+  
+  <div class="instructions">
+    <div class="instruction-step">1. Open any YouTube video.</div>
+    <div class="instruction-step">2. Click the <b>"Use Avatar"</b> button injected below the video title bar.</div>
+    <div class="instruction-step">3. Watch the avatar sign along in the bottom-right corner!</div>
+  </div>
+  
+  <div class="footer">
+    ISL Avatar Extension v1.0
+  </div>
+</body>
+</html>

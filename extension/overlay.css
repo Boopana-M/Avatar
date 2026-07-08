@@ -1,0 +1,162 @@
+/* Injected Button Styles */
+.isl-inject-button {
+  background-color: #00adb5 !important;
+  color: #ffffff !important;
+  border: none !important;
+  border-radius: 18px !important;
+  padding: 0 16px !important;
+  height: 36px !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  margin-left: 12px !important;
+  transition: all 0.2s ease !important;
+  box-shadow: 0 2px 8px rgba(0, 173, 181, 0.3) !important;
+  vertical-align: middle !important;
+}
+
+.isl-inject-button:hover {
+  background-color: #008f95 !important;
+  transform: translateY(-1px) !important;
+  box-shadow: 0 4px 12px rgba(0, 173, 181, 0.5) !important;
+}
+
+.isl-inject-button:active {
+  transform: translateY(1px) !important;
+}
+
+/* Floating Avatar Container */
+.isl-avatar-container {
+  position: fixed !important;
+  bottom: 24px !important;
+  right: 24px !important;
+  width: 320px !important;
+  height: 280px !important;
+  background: rgba(18, 18, 18, 0.8) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  border-radius: 16px !important;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6) !important;
+  z-index: 99999 !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+  transition: opacity 0.3s ease, transform 0.3s ease !important;
+  font-family: 'Segoe UI', system-ui, sans-serif !important;
+}
+
+/* Three.js Canvas */
+.isl-avatar-canvas {
+  width: 100% !important;
+  height: 100% !important;
+  background: transparent !important;
+}
+
+/* Loader / Status Screen */
+.isl-avatar-loader {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  background: rgba(15, 15, 15, 0.95) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: #e0e0e0 !important;
+  z-index: 2 !important;
+  padding: 20px !important;
+  box-sizing: border-box !important;
+  text-align: center !important;
+}
+
+.isl-spinner {
+  width: 40px !important;
+  height: 40px !important;
+  border: 3px solid rgba(0, 173, 181, 0.2) !important;
+  border-top: 3px solid #00adb5 !important;
+  border-radius: 50% !important;
+  animation: isl-spin 1s linear infinite !important;
+  margin-bottom: 16px !important;
+}
+
+@keyframes isl-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.isl-loader-text {
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  color: #00adb5 !important;
+  margin-bottom: 6px !important;
+}
+
+.isl-loader-subtext {
+  font-size: 11px !important;
+  color: #888888 !important;
+}
+
+/* Top Control Bar */
+.isl-avatar-header {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  padding: 8px 12px !important;
+  background: linear-gradient(to bottom, rgba(18,18,18,0.8), transparent) !important;
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  box-sizing: border-box !important;
+  z-index: 10 !important;
+}
+
+.isl-avatar-title {
+  color: #ffffff !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.8) !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+
+.isl-avatar-close {
+  background: transparent !important;
+  border: none !important;
+  color: #ffffff !important;
+  font-size: 18px !important;
+  cursor: pointer !important;
+  padding: 0 4px !important;
+  line-height: 1 !important;
+  opacity: 0.7 !important;
+  transition: opacity 0.2s !important;
+}
+
+.isl-avatar-close:hover {
+  opacity: 1 !important;
+  color: #ff3838 !important;
+}
+
+/* Warning / Word Coverage list */
+.isl-unmatched-badge {
+  position: absolute !important;
+  bottom: 8px !important;
+  left: 8px !important;
+  background: rgba(220, 53, 69, 0.2) !important;
+  border: 1px solid rgba(220, 53, 69, 0.4) !important;
+  color: #ff8b94 !important;
+  font-size: 9px !important;
+  padding: 4px 8px !important;
+  border-radius: 4px !important;
+  pointer-events: auto !important;
+  cursor: help !important;
+  z-index: 10 !important;
+}

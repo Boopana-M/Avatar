@@ -15,6 +15,26 @@ def extract_keypoints_from_video(video_path: str) -> list:
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
         
+    base_name = os.path.basename(video_path)
+    parent_dir_name = os.path.basename(os.path.dirname(video_path))
+    cache_filename = f"keypoints_{parent_dir_name}_{base_name}.json"
+    
+    # Check cache directory
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    CACHE_DIR = os.path.join(BASE_DIR, "backend", "cache")
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_path = os.path.join(CACHE_DIR, cache_filename)
+    
+    # Try loading from cache
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r") as f:
+                data = json.load(f)
+            print(f"[Keypoints] [CACHE HIT] Loaded keypoints from local cache for {base_name}.")
+            return data
+        except Exception as e:
+            print(f"[Keypoints] Failed to read keypoints cache: {e}. Re-extracting...")
+
     print(f"[Keypoints] Extracting keypoints from: {video_path}")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -63,6 +83,15 @@ def extract_keypoints_from_video(video_path: str) -> list:
             
     cap.release()
     print(f"[Keypoints] Extracted keypoints for {len(frame_keypoints)} frames from {os.path.basename(video_path)}.")
+    
+    # Save to local cache directory
+    try:
+        with open(cache_path, "w") as f:
+            json.dump(frame_keypoints, f)
+        print(f"[Keypoints] [CACHE SAVE] Keypoints saved to local cache at {cache_filename}.")
+    except Exception as e:
+        print(f"[Keypoints] Failed to save keypoints cache: {e}")
+        
     return frame_keypoints
 
 def gloss_sequence_to_keypoints(gloss_words: list, find_video_fn) -> tuple:

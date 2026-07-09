@@ -8,3 +8,4 @@ pyarrow>=11.0.0
 mediapipe>=0.10.0
 pygltflib>=1.15.0
 numpy>=1.22.0
+opencv-python>=4.7.0

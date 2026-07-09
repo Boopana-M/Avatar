@@ -1,9 +1,18 @@
 import os
 import json
 import sqlite3
+import sys
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# Reconfigure stdout and stderr to UTF-8 to prevent UnicodeEncodeError on Windows terminals
+if sys.platform.startswith('win'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
 
 # Import pipeline modules
 from pipeline.captions import get_captions, extract_video_id, CaptionsNotFoundError
@@ -13,7 +22,7 @@ from pipeline.pose_matcher import find_video_for_gloss
 from pipeline.keypoint_extractor import gloss_sequence_to_keypoints
 from pipeline.rig_mapper import map_keypoints_to_rig_sequence
 
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
@@ -47,13 +56,18 @@ app = FastAPI(title="ISL Avatar Translation API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Extension runs from chrome-extension:// origins
-    allow_credentials=True,
+    allow_credentials=False,  # Set to False to allow "*" origin wildcard
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Mount models static folder to serve avatar.glb
-app.mount("/models", StaticFiles(directory=MODELS_DIR), name="models")
+# Serve models static folder with CORS headers using FileResponse
+@app.get("/models/{file_path:path}")
+async def serve_model(file_path: str):
+    path = os.path.join(MODELS_DIR, file_path)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path)
 
 class TranslationRequest(BaseModel):
     youtube_url: str
@@ -127,7 +141,9 @@ async def translate_video(request: TranslationRequest):
         end_time = cap["end"]
         text = cap["text"]
         
-        print(f"[API] Processing segment [{start_time}s - {end_time}s]: '{text}'")
+        # Replace non-ASCII characters for safe terminal print
+        safe_text = text.encode('ascii', errors='replace').decode('ascii')
+        print(f"[API] Processing segment [{start_time}s - {end_time}s]: '{safe_text}'")
         
         # Translate to ISL Gloss
         gloss_string = text_to_gloss(text)

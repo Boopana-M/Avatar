@@ -1,127 +1,259 @@
 import os
-import json
 import cv2
+import json
 import mediapipe as mp
 
-# Initialize MediaPipe Holistic
+# Initialize MediaPipe solutions
 mp_holistic = mp.solutions.holistic
+mp_hands = mp.solutions.hands
 
-def extract_keypoints_from_video(video_path: str) -> list:
+def extract_video_keypoints(video_path):
     """
-    Runs MediaPipe Holistic on a video and extracts pose, face, and hand landmarks for each frame.
-    Returns:
-        list of dict: A sequence of frame data containing extracted keypoints.
+    Extracts pose, left hand, and right hand keypoints frame-by-frame from a video.
     """
-    if not os.path.exists(video_path):
-        raise FileNotFoundError(f"Video file not found: {video_path}")
-        
-    base_name = os.path.basename(video_path)
-    parent_dir_name = os.path.basename(os.path.dirname(video_path))
-    cache_filename = f"keypoints_{parent_dir_name}_{base_name}.json"
-    
-    # Check cache directory
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    CACHE_DIR = os.path.join(BASE_DIR, "backend", "cache")
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    cache_path = os.path.join(CACHE_DIR, cache_filename)
-    
-    # Try loading from cache
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, "r") as f:
-                data = json.load(f)
-            print(f"[Keypoints] [CACHE HIT] Loaded keypoints from local cache for {base_name}.")
-            return data
-        except Exception as e:
-            print(f"[Keypoints] Failed to read keypoints cache: {e}. Re-extracting...")
-
-    print(f"[Keypoints] Extracting keypoints from: {video_path}")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise IOError(f"Could not open video file: {video_path}")
+        raise Exception(f"Failed to open video file: {video_path}")
         
-    frame_keypoints = []
-    frame_index = 0
+    frames_keypoints = []
     
-    # Use MediaPipe Holistic context manager
     with mp_holistic.Holistic(
-        static_image_mode=False,
-        model_complexity=1,
-        smooth_landmarks=True,
-        refine_face_landmarks=True
+        static_image_mode=False, 
+        model_complexity=1, 
+        min_detection_confidence=0.5, 
+        min_tracking_confidence=0.5
     ) as holistic:
-        
         while cap.isOpened():
-            success, frame = cap.read()
-            if not success:
+            ret, frame = cap.read()
+            if not ret:
                 break
                 
-            # Convert the BGR image to RGB
             image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Process the frame with MediaPipe Holistic
             results = holistic.process(image_rgb)
             
-            # Helper function to serialize landmarks
-            def serialize_landmarks(landmarks):
-                if not landmarks:
-                    return []
-                return [{"x": lm.x, "y": lm.y, "z": lm.z, "visibility": getattr(lm, 'visibility', 1.0)} 
-                        for lm in landmarks.landmark]
-            
-            # Extract landmarks for this frame
-            frame_data = {
-                "frame": frame_index,
-                "pose": serialize_landmarks(results.pose_landmarks),
-                "face": serialize_landmarks(results.face_landmarks),
-                "left_hand": serialize_landmarks(results.left_hand_landmarks),
-                "right_hand": serialize_landmarks(results.right_hand_landmarks)
-            }
-            
-            frame_keypoints.append(frame_data)
-            frame_index += 1
+            # Extract Pose (33 landmarks)
+            pose_list = []
+            if results.pose_landmarks:
+                for lm in results.pose_landmarks.landmark:
+                    pose_list.append([lm.x, lm.y, lm.z, lm.visibility])
+            else:
+                pose_list = [[0.0, 0.0, 0.0, 0.0] for _ in range(33)]
+                
+            # Extract Left Hand (21 landmarks)
+            left_hand_list = []
+            if results.left_hand_landmarks:
+                for lm in results.left_hand_landmarks.landmark:
+                    left_hand_list.append([lm.x, lm.y, lm.z])
+            else:
+                left_hand_list = [[0.0, 0.0, 0.0] for _ in range(21)]
+                
+            # Extract Right Hand (21 landmarks)
+            right_hand_list = []
+            if results.right_hand_landmarks:
+                for lm in results.right_hand_landmarks.landmark:
+                    right_hand_list.append([lm.x, lm.y, lm.z])
+            else:
+                right_hand_list = [[0.0, 0.0, 0.0] for _ in range(21)]
+                
+            frames_keypoints.append({
+                "pose": pose_list,
+                "left_hand": left_hand_list,
+                "right_hand": right_hand_list
+            })
             
     cap.release()
-    print(f"[Keypoints] Extracted keypoints for {len(frame_keypoints)} frames from {os.path.basename(video_path)}.")
-    
-    # Save to local cache directory
-    try:
-        with open(cache_path, "w") as f:
-            json.dump(frame_keypoints, f)
-        print(f"[Keypoints] [CACHE SAVE] Keypoints saved to local cache at {cache_filename}.")
-    except Exception as e:
-        print(f"[Keypoints] Failed to save keypoints cache: {e}")
-        
-    return frame_keypoints
+    return frames_keypoints
 
-def gloss_sequence_to_keypoints(gloss_words: list, find_video_fn) -> tuple:
+def extract_image_keypoints(image_path):
     """
-    Given a list of gloss words and a pose matching function, finds videos and extracts
-    keypoints. Stitches the keypoints together.
-    Returns:
-        tuple: (list of stitched frame keypoints, list of unmatched words)
+    Extracts pose and hand keypoints from a static fingerspelling image.
+    Uses MediaPipe Hands since static images typically only depict the hand.
     """
-    stitched_keypoints = []
-    unmatched_words = []
+    img = cv2.imread(image_path)
+    if img is None:
+        raise Exception(f"Failed to load image: {image_path}")
+        
+    image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     
-    for word in gloss_words:
-        video_path = find_video_fn(word)
-        if not video_path:
-            print(f"[Keypoints] No video found for word: {word}")
-            unmatched_words.append(word)
-            continue
+    with mp_hands.Hands(
+        static_image_mode=True, 
+        max_num_hands=2, 
+        min_detection_confidence=0.5
+    ) as hands:
+        results = hands.process(image_rgb)
+        
+        left_hand_list = [[0.0, 0.0, 0.0] for _ in range(21)]
+        right_hand_list = [[0.0, 0.0, 0.0] for _ in range(21)]
+        
+        if results.multi_hand_landmarks:
+            for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                handedness = results.multi_handedness[idx].classification[0].label  # 'Left' or 'Right'
+                
+                lm_list = []
+                for lm in hand_landmarks.landmark:
+                    lm_list.append([lm.x, lm.y, lm.z])
+                    
+                if handedness == 'Left':
+                    left_hand_list = lm_list
+                else:
+                    right_hand_list = lm_list
+                    
+        # Pose landmarks mock (zeros) since static hand image contains no body
+        pose_list = [[0.0, 0.0, 0.0, 0.0] for _ in range(33)]
+        
+        return [{
+            "pose": pose_list,
+            "left_hand": left_hand_list,
+            "right_hand": right_hand_list
+        }]
+
+def extract_images_sequence_keypoints(image_paths):
+    """
+    Extracts keypoints frame-by-frame from a sequence of images (used for CSLTR Frames_Word_Level).
+    """
+    frames_keypoints = []
+    
+    with mp_holistic.Holistic(
+        static_image_mode=True, 
+        model_complexity=1, 
+        min_detection_confidence=0.5
+    ) as holistic:
+        for img_path in image_paths:
+            img = cv2.imread(img_path)
+            if img is None:
+                continue
+                
+            image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            results = holistic.process(image_rgb)
             
-        try:
-            keypoints = extract_keypoints_from_video(video_path)
-            stitched_keypoints.extend(keypoints)
-        except Exception as e:
-            print(f"[Keypoints] Error extracting keypoints for word '{word}' from {video_path}: {e}")
-            unmatched_words.append(word)
+            # Pose
+            pose_list = []
+            if results.pose_landmarks:
+                for lm in results.pose_landmarks.landmark:
+                    pose_list.append([lm.x, lm.y, lm.z, lm.visibility])
+            else:
+                pose_list = [[0.0, 0.0, 0.0, 0.0] for _ in range(33)]
+                
+            # Left Hand
+            left_hand_list = []
+            if results.left_hand_landmarks:
+                for lm in results.left_hand_landmarks.landmark:
+                    left_hand_list.append([lm.x, lm.y, lm.z])
+            else:
+                left_hand_list = [[0.0, 0.0, 0.0] for _ in range(21)]
+                
+            # Right Hand
+            right_hand_list = []
+            if results.right_hand_landmarks:
+                for lm in results.right_hand_landmarks.landmark:
+                    right_hand_list.append([lm.x, lm.y, lm.z])
+            else:
+                right_hand_list = [[0.0, 0.0, 0.0] for _ in range(21)]
+                
+            frames_keypoints.append({
+                "pose": pose_list,
+                "left_hand": left_hand_list,
+                "right_hand": right_hand_list
+            })
             
-    return stitched_keypoints, unmatched_words
+    return frames_keypoints
+
+def get_cache_path(input_path, cache_dir):
+    """
+    Generates a unique, sanitized cache filename for a single file.
+    """
+    project_root = os.path.dirname(os.path.dirname(cache_dir))
+    rel_path = os.path.relpath(input_path, project_root)
+    safe_name = rel_path.replace(os.sep, "_").replace(":", "_").replace("..", "up")
+    return os.path.join(cache_dir, safe_name + ".json")
+
+def get_sequence_cache_path(image_paths, cache_dir):
+    """
+    Generates a unique, sanitized cache filename for a sequence of image frames.
+    """
+    if not image_paths:
+        return None
+    parent_dir = os.path.dirname(image_paths[0])
+    project_root = os.path.dirname(os.path.dirname(cache_dir))
+    rel_path = os.path.relpath(parent_dir, project_root)
+    safe_name = rel_path.replace(os.sep, "_").replace(":", "_").replace("..", "up")
+    return os.path.join(cache_dir, safe_name + "_sequence.json")
+
+def get_keypoints(match_entry, cache_dir):
+    """
+    Retrieves keypoints for a match, resolving from disk cache or running MediaPipe extractor.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    source = match_entry.get("source")
+    files = match_entry.get("files", [])
+    
+    if source == "fingerspelling":
+        if not files:
+            return []
+        img_path = files[0]
+        cpath = get_cache_path(img_path, cache_dir)
+        if os.path.exists(cpath):
+            with open(cpath, 'r') as f:
+                return json.load(f)
+        keypoints = extract_image_keypoints(img_path)
+        with open(cpath, 'w') as f:
+            json.dump(keypoints, f)
+        return keypoints
+        
+    elif source in ("landmarks", "videos"):
+        if not files:
+            return []
+        video_path = files[0]
+        cpath = get_cache_path(video_path, cache_dir)
+        if os.path.exists(cpath):
+            with open(cpath, 'r') as f:
+                return json.load(f)
+        keypoints = extract_video_keypoints(video_path)
+        with open(cpath, 'w') as f:
+            json.dump(keypoints, f)
+        return keypoints
+        
+    elif source == "csltr":
+        if not files:
+            return []
+        cpath = get_sequence_cache_path(files, cache_dir)
+        if os.path.exists(cpath):
+            with open(cpath, 'r') as f:
+                return json.load(f)
+        keypoints = extract_images_sequence_keypoints(files)
+        with open(cpath, 'w') as f:
+            json.dump(keypoints, f)
+        return keypoints
+        
+    return []
 
 if __name__ == "__main__":
-    # Test block
-    print("Testing Keypoint Extractor module...")
-    # This requires an actual video file to run, so we'll test it end-to-end in Step 10
-    print("Module compiled successfully. Ready for use.")
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+    cache_dir = os.path.join(project_root, "backend", "cache")
+    
+    print("=== TESTING KEYPOINT EXTRACTOR ===")
+    
+    # Mock lookup entries for test
+    test_entries = [
+        {
+            "word": "A",
+            "source": "fingerspelling",
+            "files": [os.path.join(project_root, "data", "fingerspelling", "dataset - Gesture Speech", "a", "0.jpg")]
+        }
+    ]
+    
+    for entry in test_entries:
+        word = entry["word"]
+        print(f"Extracting keypoints for: '{word}'...")
+        try:
+            kps = get_keypoints(entry, cache_dir)
+            print(f"Success! Extracted {len(kps)} frames of keypoints.")
+            if kps:
+                first_frame = kps[0]
+                print(f"  Pose keypoints count: {len(first_frame['pose'])}")
+                print(f"  Left Hand keypoints count: {len(first_frame['left_hand'])}")
+                print(f"  Right Hand keypoints count: {len(first_frame['right_hand'])}")
+        except Exception as e:
+            print(f"Extraction failed for '{word}': {e}")

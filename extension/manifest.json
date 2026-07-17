@@ -1,33 +1,37 @@
 {
   "manifest_version": 3,
-  "name": "ISL Sign Language Avatar Overlay",
-  "version": "1.0",
-  "description": "Displays a bottom-right animated ISL avatar synced to YouTube playback.",
+  "name": "Indian Sign Language (ISL) Avatar",
+  "version": "1.0.0",
+  "description": "Appears as a floating 3D avatar interpreter on YouTube videos to sign spoken content in Indian Sign Language.",
   "permissions": [
-    "activeTab"
+    "activeTab",
+    "storage"
   ],
   "host_permissions": [
-    "https://www.youtube.com/*",
-    "http://localhost:8000/*"
-  ],
-  "content_scripts": [
-    {
-      "matches": [
-        "https://www.youtube.com/watch*"
-      ],
-      "js": [
-        "lib/three.min.js",
-        "lib/GLTFLoader.js",
-        "overlay.js",
-        "content_script.js"
-      ],
-      "css": [
-        "overlay.css"
-      ],
-      "run_at": "document_end"
-    }
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*",
+    "https://*.youtube.com/*"
   ],
   "action": {
     "default_popup": "popup.html"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.youtube.com/watch*"],
+      "js": ["content_script.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "overlay.html",
+        "overlay.js",
+        "lib/three.min.js",
+        "lib/GLTFLoader.js",
+        "lib/three-vrm.js"
+      ],
+      "matches": ["https://*.youtube.com/*"]
+    }
+  ]
 }

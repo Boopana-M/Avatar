@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ISL Avatar Interpreter Frame</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #0b0c10;
+      color: #c5c6c7;
+      font-family: 'Outfit', sans-serif;
+      user-select: none;
+    }
+    
+    #canvas-container {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 1;
+    }
+    
+    canvas {
+      width: 100% !important;
+      height: 100% !important;
+      display: block;
+    }
+    
+    /* Loading overlay styles */
+    #loading-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(11, 12, 16, 0.95);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 10;
+      transition: opacity 0.5s ease;
+    }
+    
+    .spinner {
+      width: 50px;
+      height: 50px;
+      border: 3px solid rgba(0, 173, 181, 0.1);
+      border-radius: 50%;
+      border-top-color: #00adb5;
+      animation: spin 1s ease-in-out infinite;
+    }
+    
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    
+    .loading-text {
+      margin-top: 20px;
+      font-size: 14px;
+      font-weight: 400;
+      color: #00adb5;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      text-align: center;
+      padding: 0 20px;
+      line-height: 1.5;
+    }
+    
+    /* HUD Overlay cards */
+    .hud-card {
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      background: rgba(26, 26, 29, 0.75);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 8px;
+      padding: 8px 12px;
+      z-index: 5;
+      box-sizing: border-box;
+    }
+    
+    #status-card {
+      top: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 600;
+      color: #e50914;
+    }
+    
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: #e50914;
+      margin-right: 6px;
+      animation: pulse 1.5s infinite alternate;
+    }
+    
+    @keyframes pulse {
+      from { opacity: 0.4; }
+      to { opacity: 1; }
+    }
+    
+    .status-indicator.active {
+      color: #00adb5;
+    }
+    
+    .status-indicator.active .status-dot {
+      background-color: #00adb5;
+      animation: pulse-active 1s infinite alternate;
+    }
+    
+    @keyframes pulse-active {
+      from { box-shadow: 0 0 2px #00adb5; }
+      to { box-shadow: 0 0 8px #00adb5; }
+    }
+    
+    #gloss-card {
+      bottom: 10px;
+      min-height: 54px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+    }
+    
+    .word-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: #666;
+      letter-spacing: 0.5px;
+      margin-bottom: 2px;
+    }
+    
+    .word-text {
+      font-size: 16px;
+      font-weight: 600;
+      color: #ffffff;
+      letter-spacing: 0.5px;
+      text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+    }
+    
+    .word-tier {
+      font-size: 9px;
+      padding: 1px 4px;
+      border-radius: 3px;
+      margin-top: 4px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    
+    .tier-exact { background: rgba(0, 173, 181, 0.2); color: #00adb5; }
+    .tier-lemma { background: rgba(249, 168, 37, 0.2); color: #f9a825; }
+    .tier-spell { background: rgba(233, 30, 99, 0.2); color: #e91e63; }
+    .tier-none { background: rgba(255, 255, 255, 0.1); color: #bbb; }
+  </style>
+</head>
+<body>
+  <!-- Canvas for 3D render -->
+  <div id="canvas-container"></div>
+  
+  <!-- Loading spinner overlay -->
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <div class="loading-text" id="loading-message">Initializing 3D Environment...</div>
+  </div>
+  
+  <!-- HUD components -->
+  <div id="status-card" class="hud-card">
+    <span style="font-size: 12px; color: #888;">ISL Interpreter</span>
+    <div id="status-indicator" class="status-indicator">
+      <span class="status-dot"></span>
+      <span id="status-text">OFFLINE</span>
+    </div>
+  </div>
+  
+  <div id="gloss-card" class="hud-card">
+    <div class="word-label" id="word-label">Spoken/Gloss</div>
+    <div class="word-text" id="word-text">--</div>
+    <div class="word-tier" id="word-tier" style="display: none;">Tier</div>
+  </div>
+
+  <!-- Local libraries -->
+  <script src="lib/three.min.js"></script>
+  <script src="lib/GLTFLoader.js"></script>
+  <script src="lib/three-vrm.js"></script>
+  <script src="overlay.js"></script>
+</body>
+</html>

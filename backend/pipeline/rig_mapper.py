@@ -1,306 +1,473 @@
 import os
-import json
-import math
+import re
 import numpy as np
 from pygltflib import GLTF2
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-AVATAR_DEFAULT_PATH = os.path.join(BASE_DIR, "backend", "models", "avatar.glb")
+# Vector and Quaternion math helpers in list/numpy format
 
-# Standard bone name mapping table (Mixamo / Ready Player Me naming)
-DEFAULT_BONE_MAPPING = {
-    "leftArm": "LeftArm",
-    "leftForeArm": "LeftForeArm",
-    "leftHand": "LeftHand",
-    "rightArm": "RightArm",
-    "rightForeArm": "RightForeArm",
-    "rightHand": "RightHand",
-    # Left fingers
-    "leftThumb1": "LeftHandThumb1", "leftThumb2": "LeftHandThumb2", "leftThumb3": "LeftHandThumb3",
-    "leftIndex1": "LeftHandIndex1", "leftIndex2": "LeftHandIndex2", "leftIndex3": "LeftHandIndex3",
-    "leftMiddle1": "LeftHandMiddle1", "leftMiddle2": "LeftHandMiddle2", "leftMiddle3": "LeftHandMiddle3",
-    "leftRing1": "LeftHandRing1", "leftRing2": "LeftHandRing2", "leftRing3": "LeftHandRing3",
-    "leftPinky1": "LeftHandPinky1", "leftPinky2": "LeftHandPinky2", "leftPinky3": "LeftHandPinky3",
-    # Right fingers
-    "rightThumb1": "RightHandThumb1", "rightThumb2": "RightHandThumb2", "rightThumb3": "RightHandThumb3",
-    "rightIndex1": "RightHandIndex1", "rightIndex2": "RightHandIndex2", "rightIndex3": "RightHandIndex3",
-    "rightMiddle1": "RightHandMiddle1", "rightMiddle2": "RightHandMiddle2", "rightMiddle3": "RightHandMiddle3",
-    "rightRing1": "RightHandRing1", "rightRing2": "RightHandRing2", "rightRing3": "RightHandRing3",
-    "rightPinky1": "RightHandPinky1", "rightPinky2": "RightHandPinky2", "rightPinky3": "RightHandPinky3"
-}
+def normalize_vector(v):
+    norm = np.linalg.norm(v)
+    if norm < 1e-6:
+        return np.zeros(3)
+    return v / norm
 
-def get_avatar_bone_names(avatar_path=None) -> dict:
-    """
-    Reads the avatar GLB nodes using pygltflib to check actual bone names.
-    Maps generic rig bone names to the actual bone names found in the GLB file.
-    """
-    if not avatar_path:
-        avatar_path = AVATAR_DEFAULT_PATH
+def q_multiply(q1, q2):
+    x1, y1, z1, w1 = q1
+    x2, y2, z2, w2 = q2
+    return [
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+        w1*w2 - x1*x2 - y1*y2 - z1*z2
+    ]
+
+def q_conjugate(q):
+    return [-q[0], -q[1], -q[2], q[3]]
+
+def q_rotate_vector(q, v):
+    q_v = [v[0], v[1], v[2], 0.0]
+    q_conj = q_conjugate(q)
+    res = q_multiply(q_multiply(q, q_v), q_conj)
+    return np.array([res[0], res[1], res[2]])
+
+def q_nlerp(q1, q2, t):
+    dot = sum(a * b for a, b in zip(q1, q2))
+    if dot < 0.0:
+        q2 = [-x for x in q2]
+        dot = -dot
+    
+    q_interp = [(1 - t) * a + t * b for a, b in zip(q1, q2)]
+    norm = sum(x * x for x in q_interp) ** 0.5
+    if norm < 1e-6:
+        return q1
+    return [x / norm for x in q_interp]
+
+def rotation_between_vectors(v_from, v_to):
+    v_from = normalize_vector(v_from)
+    v_to = normalize_vector(v_to)
+    
+    cos_theta = np.dot(v_from, v_to)
+    if cos_theta > 0.99999:
+        return [0.0, 0.0, 0.0, 1.0]
+    if cos_theta < -0.99999:
+        orthogonal = np.array([0.0, 0.0, 0.0])
+        if abs(v_from[0]) < 0.9:
+            orthogonal[0] = 1.0
+        else:
+            orthogonal[1] = 1.0
+        axis = np.cross(v_from, orthogonal)
+        axis = normalize_vector(axis)
+        return [axis[0], axis[1], axis[2], 0.0]
         
-    mapping = DEFAULT_BONE_MAPPING.copy()
-    if not os.path.exists(avatar_path):
-        print(f"[RigMapper] Avatar model not found at {avatar_path}. Using default RPM naming.")
-        return mapping
+    axis = np.cross(v_from, v_to)
+    axis = normalize_vector(axis)
+    
+    half_theta = np.arccos(cos_theta) / 2.0
+    s = np.sin(half_theta)
+    return [axis[0] * s, axis[1] * s, axis[2] * s, np.cos(half_theta)]
+
+# VRM Bone discovery helper
+def get_vrm_bone_names():
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+    
+    vrm_path = os.path.join(project_root, "backend", "models", "avatar.vrm")
+    if not os.path.exists(vrm_path):
+        vrm_path = os.path.join(project_root, "backend", "models", "Avatar.vrm")
+        
+    if not os.path.exists(vrm_path):
+        return []
         
     try:
-        gltf = GLTF2.load(avatar_path)
-        node_names = [node.name for node in gltf.nodes if node.name]
-        print(f"[RigMapper] Successfully loaded {avatar_path}. Found {len(node_names)} nodes.")
+        gltf = GLTF2().load_binary(vrm_path)
+        return [node.name for node in gltf.nodes if node.name]
+    except Exception:
+        return []
+
+# Resolve dynamic bone names from VRM
+def discover_rig_mapping():
+    bone_names = get_vrm_bone_names()
+    
+    def find_bone(pattern):
+        pattern_lower = pattern.lower()
+        for name in bone_names:
+            if pattern_lower in name.lower():
+                return name
+        return None
         
-        # Check bone name prefixes (e.g. 'mixamorig:LeftArm' or 'Armature|LeftArm')
-        # We search case-insensitively for the matching bone in the nodes list
-        for key, default_val in DEFAULT_BONE_MAPPING.items():
-            for node_name in node_names:
-                # Match if node_name ends with default_val or matches standard mixamo formats
-                if (node_name.lower().endswith(default_val.lower()) or 
-                    default_val.lower() in node_name.lower()):
-                    mapping[key] = node_name
-                    break
-                    
-        print("[RigMapper] Custom GLB bone mapping initialized successfully.")
-    except Exception as e:
-        print(f"[RigMapper] Error parsing GLB file bone names: {e}. Falling back to default RPM naming.")
+    def find_finger_bones(prefix, finger):
+        matches = [name for name in bone_names if name.startswith(prefix) and finger.lower() in name.lower()]
+        matches.sort(key=lambda x: [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', x)])
+        return matches
+
+    mapping = {
+        "L_UpperArm": find_bone("J_Bip_L_UpperArm") or "J_Bip_L_UpperArm",
+        "L_LowerArm": find_bone("J_Bip_L_LowerArm") or "J_Bip_L_LowerArm",
+        "L_Hand": find_bone("J_Bip_L_Hand") or "J_Bip_L_Hand",
+        
+        "R_UpperArm": find_bone("J_Bip_R_UpperArm") or "J_Bip_R_UpperArm",
+        "R_LowerArm": find_bone("J_Bip_R_LowerArm") or "J_Bip_R_LowerArm",
+        "R_Hand": find_bone("J_Bip_R_Hand") or "J_Bip_R_Hand",
+    }
+    
+    fingers = ["Thumb", "Index", "Middle", "Ring", "Little"]
+    for f in fingers:
+        mapping[f"L_{f}"] = find_finger_bones("J_Bip_L_", f)
+        mapping[f"R_{f}"] = find_finger_bones("J_Bip_R_", f)
         
     return mapping
 
-def nlerp_quaternion(q1, q2, t):
-    """
-    Spherical-like Normalized Linear Interpolation (NLERP) for two quaternions [x, y, z, w].
-    """
-    q1 = np.array(q1)
-    q2 = np.array(q2)
-    
-    # Double cover check: if dot product is negative, invert one quaternion
-    dot = np.dot(q1, q2)
-    if dot < 0.0:
-        q2 = -q2
-        dot = -dot
-        
-    q_interp = q1 * (1.0 - t) + q2 * t
-    norm = np.linalg.norm(q_interp)
-    if norm < 1e-6:
-        return list(q1)
-    return list(q_interp / norm)
+# Global config mapping
+RIG_MAP = discover_rig_mapping()
 
-def get_rotation_quaternion(v_from, v_to):
+# Natural resting/idle pose rotations
+# Instead of T-pose, arms hang down along the torso, slightly bent
+REST_POSE = {
+    RIG_MAP["L_UpperArm"]: [0.0, 0.0, -0.64279, 0.76604], # ~80 degrees down around Z
+    RIG_MAP["R_UpperArm"]: [0.0, 0.0, 0.64279, 0.76604],  # ~80 degrees down around Z
+    RIG_MAP["L_LowerArm"]: [0.0, 0.17365, 0.0, 0.98481],  # bent slightly
+    RIG_MAP["R_LowerArm"]: [0.0, -0.17365, 0.0, 0.98481],
+    RIG_MAP["L_Hand"]: [0.0, 0.0, 0.0, 1.0],
+    RIG_MAP["R_Hand"]: [0.0, 0.0, 0.0, 1.0],
+}
+
+# Fill other joints with identity in rest pose
+for finger_list in [RIG_MAP[f"L_{f}"] + RIG_MAP[f"R_{f}"] for f in ["Thumb", "Index", "Middle", "Ring", "Little"]]:
+    for bone in finger_list:
+        REST_POSE[bone] = [0.0, 0.0, 0.0, 1.0]
+
+def map_single_frame(frame_keypoints):
     """
-    Computes the quaternion that rotates vector v_from into vector v_to.
+    Maps a single frame's keypoints to bone rotations. Falls back to REST_POSE if landmarks are missing.
     """
-    v_from_norm = np.linalg.norm(v_from)
-    v_to_norm = np.linalg.norm(v_to)
-    if v_from_norm < 1e-6 or v_to_norm < 1e-6:
-        return [0.0, 0.0, 0.0, 1.0]
-        
-    v_from = v_from / v_from_norm
-    v_to = v_to / v_to_norm
+    pose = frame_keypoints.get("pose", [])
+    left_hand = frame_keypoints.get("left_hand", [])
+    right_hand = frame_keypoints.get("right_hand", [])
     
-    dot = np.dot(v_from, v_to)
-    if dot > 0.99999:
-        return [0.0, 0.0, 0.0, 1.0]
-    elif dot < -0.99999:
-        # 180 degrees rotation: find any orthogonal axis
-        orthogonal = np.array([1.0, 0.0, 0.0])
-        if abs(v_from[0]) > 0.9:
-            orthogonal = np.array([0.0, 1.0, 0.0])
-        axis = np.cross(v_from, orthogonal)
-        axis = axis / np.linalg.norm(axis)
-        return [float(axis[0]), float(axis[1]), float(axis[2]), 0.0]
-        
-    cross = np.cross(v_from, v_to)
-    s = math.sqrt((1.0 + dot) * 2.0)
-    inv_s = 1.0 / s
+    # Check if landmarks are empty/invalid
+    is_pose_valid = len(pose) > 16 and np.linalg.norm(pose[11][:3]) > 1e-4
+    is_l_hand_valid = len(left_hand) > 0 and np.linalg.norm(left_hand[0]) > 1e-4
+    is_r_hand_valid = len(right_hand) > 0 and np.linalg.norm(right_hand[0]) > 1e-4
     
-    return [
-        float(cross[0] * inv_s),
-        float(cross[1] * inv_s),
-        float(cross[2] * inv_s),
-        float(s * 0.5)
+    # Initialize with copy of rest pose
+    rotations = REST_POSE.copy()
+    
+    if not is_pose_valid and not is_l_hand_valid and not is_r_hand_valid:
+        return rotations
+
+    def get_pose_pt(idx):
+        if idx >= len(pose):
+            return np.zeros(3)
+        pt = pose[idx]
+        return np.array([-pt[0], -pt[1], -pt[2]])
+        
+    def get_hand_pt(hand_list, idx):
+        if idx >= len(hand_list):
+            return np.zeros(3)
+        pt = hand_list[idx]
+        return np.array([-pt[0], -pt[1], -pt[2]])
+
+    # 1. Map Left Arm
+    p_l_shoulder = get_pose_pt(11)
+    p_l_elbow = get_pose_pt(13)
+    p_l_wrist = get_pose_pt(15)
+    d_l_arm_default = np.array([1.0, 0.0, 0.0])
+    
+    q_l_upper = REST_POSE[RIG_MAP["L_UpperArm"]]
+    v_l_upper = p_l_elbow - p_l_shoulder
+    if np.linalg.norm(v_l_upper) > 1e-4:
+        q_l_upper = rotation_between_vectors(d_l_arm_default, v_l_upper)
+        rotations[RIG_MAP["L_UpperArm"]] = q_l_upper
+        
+    q_l_lower = REST_POSE[RIG_MAP["L_LowerArm"]]
+    v_l_lower = p_l_wrist - p_l_elbow
+    if np.linalg.norm(v_l_lower) > 1e-4:
+        v_l_lower_local = q_rotate_vector(q_conjugate(q_l_upper), v_l_lower)
+        q_l_lower = rotation_between_vectors(d_l_arm_default, v_l_lower_local)
+        rotations[RIG_MAP["L_LowerArm"]] = q_l_lower
+        
+    p_l_hand_wrist = get_hand_pt(left_hand, 0)
+    p_l_hand_middle_base = get_hand_pt(left_hand, 9)
+    q_l_hand = REST_POSE[RIG_MAP["L_Hand"]]
+    q_l_arm_cum = q_multiply(q_l_upper, q_l_lower)
+    
+    if np.linalg.norm(p_l_hand_middle_base - p_l_hand_wrist) > 1e-4:
+        v_l_hand = p_l_hand_middle_base - p_l_hand_wrist
+        v_l_hand_local = q_rotate_vector(q_conjugate(q_l_arm_cum), v_l_hand)
+        q_l_hand = rotation_between_vectors(d_l_arm_default, v_l_hand_local)
+        rotations[RIG_MAP["L_Hand"]] = q_l_hand
+        
+    q_l_hand_cum = q_multiply(q_l_arm_cum, q_l_hand)
+
+    # 2. Map Right Arm
+    p_r_shoulder = get_pose_pt(12)
+    p_r_elbow = get_pose_pt(14)
+    p_r_wrist = get_pose_pt(16)
+    d_r_arm_default = np.array([-1.0, 0.0, 0.0])
+    
+    q_r_upper = REST_POSE[RIG_MAP["R_UpperArm"]]
+    v_r_upper = p_r_elbow - p_r_shoulder
+    if np.linalg.norm(v_r_upper) > 1e-4:
+        q_r_upper = rotation_between_vectors(d_r_arm_default, v_r_upper)
+        rotations[RIG_MAP["R_UpperArm"]] = q_r_upper
+        
+    q_r_lower = REST_POSE[RIG_MAP["R_LowerArm"]]
+    v_r_lower = p_r_wrist - p_r_elbow
+    if np.linalg.norm(v_r_lower) > 1e-4:
+        v_r_lower_local = q_rotate_vector(q_conjugate(q_r_upper), v_r_lower)
+        q_r_lower = rotation_between_vectors(d_r_arm_default, v_r_lower_local)
+        rotations[RIG_MAP["R_LowerArm"]] = q_r_lower
+        
+    p_r_hand_wrist = get_hand_pt(right_hand, 0)
+    p_r_hand_middle_base = get_hand_pt(right_hand, 9)
+    q_r_hand = REST_POSE[RIG_MAP["R_Hand"]]
+    q_r_arm_cum = q_multiply(q_r_upper, q_r_lower)
+    
+    if np.linalg.norm(p_r_hand_middle_base - p_r_hand_wrist) > 1e-4:
+        v_r_hand = p_r_hand_middle_base - p_r_hand_wrist
+        v_r_hand_local = q_rotate_vector(q_conjugate(q_r_arm_cum), v_r_hand)
+        q_r_hand = rotation_between_vectors(d_r_arm_default, v_r_hand_local)
+        rotations[RIG_MAP["R_Hand"]] = q_r_hand
+        
+    q_r_hand_cum = q_multiply(q_r_arm_cum, q_r_hand)
+
+    # 3. Map Fingers
+    fingers_mapping = [
+        ("Thumb", [1, 2, 3, 4]),
+        ("Index", [5, 6, 7, 8]),
+        ("Middle", [9, 10, 11, 12]),
+        ("Ring", [13, 14, 15, 16]),
+        ("Little", [17, 18, 19, 20])
     ]
+    
+    if is_l_hand_valid:
+        for f_name, indices in fingers_mapping:
+            bone_list = RIG_MAP[f"L_{f_name}"]
+            q_cum_parent = q_l_hand_cum
+            for segment_idx in range(min(3, len(bone_list))):
+                bone_name = bone_list[segment_idx]
+                pt_start = get_hand_pt(left_hand, indices[segment_idx])
+                pt_end = get_hand_pt(left_hand, indices[segment_idx + 1])
+                v_segment = pt_end - pt_start
+                
+                q_seg = [0.0, 0.0, 0.0, 1.0]
+                if np.linalg.norm(v_segment) > 1e-4:
+                    v_seg_local = q_rotate_vector(q_conjugate(q_cum_parent), v_segment)
+                    q_seg = rotation_between_vectors(d_l_arm_default, v_seg_local)
+                
+                rotations[bone_name] = q_seg
+                q_cum_parent = q_multiply(q_cum_parent, q_seg)
 
-def calculate_finger_bending_quaternion(finger_landmarks, is_left=True):
-    """
-    Estimates the bending quaternion of finger joints based on landmarks.
-    A simplified model: we inspect the angle of the PIP joint.
-    """
-    if len(finger_landmarks) < 4:
-        return [0.0, 0.0, 0.0, 1.0] # Default open
-        
-    # Landmarks: 0: MCP, 1: PIP, 2: DIP, 3: TIP
-    p0 = np.array([finger_landmarks[0]['x'], finger_landmarks[0]['y'], finger_landmarks[0]['z']])
-    p1 = np.array([finger_landmarks[1]['x'], finger_landmarks[1]['y'], finger_landmarks[1]['z']])
-    p2 = np.array([finger_landmarks[2]['x'], finger_landmarks[2]['y'], finger_landmarks[2]['z']])
-    
-    v1 = p1 - p0
-    v2 = p2 - p1
-    
-    v1_n = v1 / np.linalg.norm(v1) if np.linalg.norm(v1) > 1e-6 else v1
-    v2_n = v2 / np.linalg.norm(v2) if np.linalg.norm(v2) > 1e-6 else v2
-    
-    dot = np.clip(np.dot(v1_n, v2_n), -1.0, 1.0)
-    angle = math.acos(dot) # Angle in radians (0: open, 1.5+: closed)
-    
-    # Limit angle to maximum bending
-    angle = np.clip(angle, 0.0, 1.4)
-    
-    # Left fingers bend in opposite direction along local Z axis in standard rigs
-    direction = -1.0 if is_left else 1.0
-    
-    # Calculate quaternion for rotation around local Z axis (bending axis)
-    half_angle = (angle * direction) / 2.0
-    return [0.0, 0.0, math.sin(half_angle), math.cos(half_angle)]
-
-def map_frame_keypoints_to_rotations(frame_data, bone_mapping) -> dict:
-    """
-    Maps a single frame of MediaPipe coordinates to a dict of bone names and quaternions.
-    """
-    rotations = {}
-    pose = frame_data.get('pose', [])
-    left_hand = frame_data.get('left_hand', [])
-    right_hand = frame_data.get('right_hand', [])
-    
-    # --- Map Arm Rotations from Pose Landmarks ---
-    # Index mappings for MediaPipe Pose:
-    # 11: L_Shoulder, 13: L_Elbow, 15: L_Wrist
-    # 12: R_Shoulder, 14: R_Elbow, 16: R_Wrist
-    if len(pose) > 16:
-        # Left Upper Arm
-        p_l_shoulder = np.array([pose[11]['x'], pose[11]['y'], pose[11]['z']])
-        p_l_elbow = np.array([pose[13]['x'], pose[13]['y'], pose[13]['z']])
-        v_l_arm = p_l_elbow - p_l_shoulder
-        # Default Left Arm points along +X in T-Pose
-        rotations[bone_mapping['leftArm']] = get_rotation_quaternion(np.array([1.0, 0.0, 0.0]), v_l_arm)
-        
-        # Left Lower Arm (Forearm)
-        p_l_wrist = np.array([pose[15]['x'], pose[15]['y'], pose[15]['z']])
-        v_l_forearm = p_l_wrist - p_l_elbow
-        rotations[bone_mapping['leftForeArm']] = get_rotation_quaternion(np.array([1.0, 0.0, 0.0]), v_l_forearm)
-        
-        # Right Upper Arm
-        p_r_shoulder = np.array([pose[12]['x'], pose[12]['y'], pose[12]['z']])
-        p_r_elbow = np.array([pose[14]['x'], pose[14]['y'], pose[14]['z']])
-        v_r_arm = p_r_elbow - p_r_shoulder
-        # Default Right Arm points along -X in T-Pose
-        rotations[bone_mapping['rightArm']] = get_rotation_quaternion(np.array([-1.0, 0.0, 0.0]), v_r_arm)
-        
-        # Right Lower Arm (Forearm)
-        p_r_wrist = np.array([pose[16]['x'], pose[16]['y'], pose[16]['z']])
-        v_r_forearm = p_r_wrist - p_r_elbow
-        rotations[bone_mapping['rightForeArm']] = get_rotation_quaternion(np.array([-1.0, 0.0, 0.0]), v_r_forearm)
-
-    # --- Map Left Hand Fingers ---
-    if left_hand and len(left_hand) == 21:
-        # Landmarks are grouped: Thumb (1-4), Index (5-8), Middle (9-12), Ring (13-16), Pinky (17-20)
-        rotations[bone_mapping['leftThumb1']] = calculate_finger_bending_quaternion(left_hand[1:5], is_left=True)
-        rotations[bone_mapping['leftThumb2']] = calculate_finger_bending_quaternion(left_hand[2:5], is_left=True)
-        
-        rotations[bone_mapping['leftIndex1']] = calculate_finger_bending_quaternion(left_hand[5:9], is_left=True)
-        rotations[bone_mapping['leftIndex2']] = calculate_finger_bending_quaternion(left_hand[6:9], is_left=True)
-        
-        rotations[bone_mapping['leftMiddle1']] = calculate_finger_bending_quaternion(left_hand[9:13], is_left=True)
-        rotations[bone_mapping['leftMiddle2']] = calculate_finger_bending_quaternion(left_hand[10:13], is_left=True)
-        
-        rotations[bone_mapping['leftRing1']] = calculate_finger_bending_quaternion(left_hand[13:17], is_left=True)
-        rotations[bone_mapping['leftRing2']] = calculate_finger_bending_quaternion(left_hand[14:17], is_left=True)
-        
-        rotations[bone_mapping['leftPinky1']] = calculate_finger_bending_quaternion(left_hand[17:21], is_left=True)
-        rotations[bone_mapping['leftPinky2']] = calculate_finger_bending_quaternion(left_hand[18:21], is_left=True)
-        
-    # --- Map Right Hand Fingers ---
-    if right_hand and len(right_hand) == 21:
-        rotations[bone_mapping['rightThumb1']] = calculate_finger_bending_quaternion(right_hand[1:5], is_left=False)
-        rotations[bone_mapping['rightThumb2']] = calculate_finger_bending_quaternion(right_hand[2:5], is_left=False)
-        
-        rotations[bone_mapping['rightIndex1']] = calculate_finger_bending_quaternion(right_hand[5:9], is_left=False)
-        rotations[bone_mapping['rightIndex2']] = calculate_finger_bending_quaternion(right_hand[6:9], is_left=False)
-        
-        rotations[bone_mapping['rightMiddle1']] = calculate_finger_bending_quaternion(right_hand[9:13], is_left=False)
-        rotations[bone_mapping['rightMiddle2']] = calculate_finger_bending_quaternion(right_hand[10:13], is_left=False)
-        
-        rotations[bone_mapping['rightRing1']] = calculate_finger_bending_quaternion(right_hand[13:17], is_left=False)
-        rotations[bone_mapping['rightRing2']] = calculate_finger_bending_quaternion(right_hand[14:17], is_left=False)
-        
-        rotations[bone_mapping['rightPinky1']] = calculate_finger_bending_quaternion(right_hand[17:21], is_left=False)
-        rotations[bone_mapping['rightPinky2']] = calculate_finger_bending_quaternion(right_hand[18:21], is_left=False)
-
+    if is_r_hand_valid:
+        for f_name, indices in fingers_mapping:
+            bone_list = RIG_MAP[f"R_{f_name}"]
+            q_cum_parent = q_r_hand_cum
+            for segment_idx in range(min(3, len(bone_list))):
+                bone_name = bone_list[segment_idx]
+                pt_start = get_hand_pt(right_hand, indices[segment_idx])
+                pt_end = get_hand_pt(right_hand, indices[segment_idx + 1])
+                v_segment = pt_end - pt_start
+                
+                q_seg = [0.0, 0.0, 0.0, 1.0]
+                if np.linalg.norm(v_segment) > 1e-4:
+                    v_seg_local = q_rotate_vector(q_conjugate(q_cum_parent), v_segment)
+                    q_seg = rotation_between_vectors(d_r_arm_default, v_seg_local)
+                
+                rotations[bone_name] = q_seg
+                q_cum_parent = q_multiply(q_cum_parent, q_seg)
+                
     return rotations
 
-def interpolate_poses(frame_rotations_1, frame_rotations_2, steps=10) -> list:
+def map_captions_to_animation(caption_blocks, fps=30):
     """
-    Interpolates between two poses (rotations) using NLERP over joint quaternions.
+    Maps list of caption blocks to a single continuous timeline synced with video playback.
+    caption_blocks: List of dicts, each containing:
+        - start: float
+        - end: float
+        - words: List of dicts, each containing:
+            - word: string
+            - source: string ("landmarks", "videos", "csltr", "fingerspelling", "unmatched")
+            - keypoints: List of frames
+            - letters: List of letter entries (if fingerspelling)
     """
-    interpolated_sequence = []
+    time_per_frame = 1.0 / fps
+    final_frames = []
     
-    for i in range(1, steps + 1):
-        t = i / float(steps + 1)
-        interp_frame = {}
-        
-        # Interpolate all bones present in either frame
-        all_bones = set(frame_rotations_1.keys()).union(set(frame_rotations_2.keys()))
-        for bone in all_bones:
-            q1 = frame_rotations_1.get(bone, [0.0, 0.0, 0.0, 1.0])
-            q2 = frame_rotations_2.get(bone, [0.0, 0.0, 0.0, 1.0])
-            interp_frame[bone] = nlerp_quaternion(q1, q2, t)
-            
-        interpolated_sequence.append(interp_frame)
-        
-    return interpolated_sequence
+    # Setup intervals
+    letter_hold_ms = 350
+    letter_interp_ms = 100
+    word_interp_ms = 200
+    blend_rest_ms = 300 # blend to/from rest pose
+    
+    def get_interpolated_frames(rotations_start, rotations_end, duration_s):
+        frames_count = max(1, int(round(duration_s / time_per_frame)))
+        interp_list = []
+        for i in range(frames_count):
+            t = i / float(frames_count)
+            all_bones = set(rotations_start.keys()).union(set(rotations_end.keys()))
+            frame_rot = {}
+            for bone in all_bones:
+                q1 = rotations_start.get(bone, [0.0, 0.0, 0.0, 1.0])
+                q2 = rotations_end.get(bone, [0.0, 0.0, 0.0, 1.0])
+                frame_rot[bone] = q_nlerp(q1, q2, t)
+            interp_list.append(frame_rot)
+        return interp_list
 
-def map_keypoints_to_rig_sequence(stitched_keypoints, avatar_path=None) -> list:
-    """
-    Converts a stitched sequence of keypoints into bone rotations, inserting smooth
-    interpolation between segments.
-    """
-    bone_mapping = get_avatar_bone_names(avatar_path)
-    
-    raw_rotations = []
-    for frame in stitched_keypoints:
-        raw_rotations.append(map_frame_keypoints_to_rotations(frame, bone_mapping))
+    # 1. Process each caption block to generate its local sign animation sequence
+    block_animations = []
+    for block in caption_blocks:
+        start_time = block["start"]
+        end_time = block["end"]
+        words = block.get("words", [])
         
-    if not raw_rotations:
-        return []
-        
-    # Insert smooth interpolation between separate signs/words if needed.
-    # In this continuous translation, since we stitched frames directly,
-    # let's insert 8 frames of interpolation at transitions where frames jump
-    # (indicated by frame_index resets in stitched keypoints).
-    smoothed_rotations = [raw_rotations[0]]
-    
-    for idx in range(1, len(raw_rotations)):
-        current_frame = raw_rotations[idx]
-        prev_frame = raw_rotations[idx-1]
-        
-        # Check if this frame is a transition to a new word.
-        # We can look at the frame index of the raw keypoints.
-        # If frame index went from N to 0, it means a new video started!
-        curr_frame_idx = stitched_keypoints[idx]['frame']
-        prev_frame_idx = stitched_keypoints[idx-1]['frame']
-        
-        if curr_frame_idx == 0 and prev_frame_idx > 0:
-            # We are transitioning between two sign clips!
-            # Insert 8 frames of interpolation to smooth the transition.
-            transition_frames = interpolate_poses(prev_frame, current_frame, steps=8)
-            smoothed_rotations.extend(transition_frames)
+        # Build raw word sequences for this block
+        computed_segments = []
+        for word_entry in words:
+            source = word_entry.get("source", "unmatched")
+            kps = word_entry.get("keypoints", [])
             
-        smoothed_rotations.append(current_frame)
-        
-    # Format to timestamped animation data: [{time: float, rotations: {bone: [x,y,z,w]}}]
-    # Assuming 25 frames per second (fps) -> 0.04s per frame
-    fps = 25.0
-    animation_sequence = []
-    for idx, rot in enumerate(smoothed_rotations):
-        animation_sequence.append({
-            "time": round(idx / fps, 3),
-            "rotations": rot
+            if source == "unmatched" or not kps:
+                # Mock rest pose for unmatched words (brief hold of 0.5s)
+                computed_segments.append({
+                    "poses": [REST_POSE] * int(0.5 / time_per_frame)
+                })
+                continue
+                
+            if source == "fingerspelling":
+                letters = word_entry.get("letters", [])
+                letter_poses = []
+                for letter_entry in letters:
+                    let_kps = letter_entry.get("keypoints", [])
+                    pose = map_single_frame(let_kps[0]) if let_kps else REST_POSE.copy()
+                    letter_poses.append(pose)
+                
+                if not letter_poses:
+                    continue
+                    
+                poses_seq = []
+                num_hold_frames = int(round((letter_hold_ms / 1000.0) / time_per_frame))
+                for idx, pose in enumerate(letter_poses):
+                    poses_seq.extend([pose] * num_hold_frames)
+                    if idx < len(letter_poses) - 1:
+                        interp_poses = get_interpolated_frames(pose, letter_poses[idx+1], letter_interp_ms / 1000.0)
+                        poses_seq.extend(interp_poses)
+                computed_segments.append({"poses": poses_seq})
+                
+            else:
+                poses_seq = [map_single_frame(f) for f in kps]
+                computed_segments.append({"poses": poses_seq})
+                
+        # Stitch word segments in this block together
+        block_poses = []
+        for i, segment in enumerate(computed_segments):
+            poses = segment["poses"]
+            block_poses.extend(poses)
+            if i < len(computed_segments) - 1:
+                next_poses = computed_segments[i+1]["poses"]
+                if next_poses:
+                    interp_poses = get_interpolated_frames(poses[-1], next_poses[0], word_interp_ms / 1000.0)
+                    block_poses.extend(interp_poses)
+                    
+        block_animations.append({
+            "start": start_time,
+            "end": end_time,
+            "poses": block_poses
         })
         
-    print(f"[RigMapper] Successfully mapped sequence to {len(animation_sequence)} animation frames.")
-    return animation_sequence
+    if not block_animations:
+        # Return empty animation with 1 rest frame
+        return {
+            "fps": fps,
+            "duration": 1.0,
+            "frames": [{"time": 0.0, "rotations": {k: [round(x, 5) for x in q] for k, q in REST_POSE.items()}}]
+        }
+        
+    # 2. Stitch blocks on a global timeline with REST_POSE gaps
+    # Max time is the end of the last caption block
+    max_time = block_animations[-1]["end"]
+    total_frames = int(round(max_time / time_per_frame)) + 30 # pad 1 sec at the end
+    
+    # Initialize timeline with None
+    timeline_poses = [None] * total_frames
+    
+    for anim in block_animations:
+        start_idx = int(round(anim["start"] / time_per_frame))
+        poses = anim["poses"]
+        
+        # Place block poses on the timeline
+        for offset, pose in enumerate(poses):
+            idx = start_idx + offset
+            if idx < len(timeline_poses):
+                timeline_poses[idx] = pose
+                
+    # 3. Fill gaps with REST_POSE and blend transitions
+    i = 0
+    while i < len(timeline_poses):
+        if timeline_poses[i] is None:
+            # We are in a gap. Find where the gap ends.
+            gap_start = i
+            while i < len(timeline_poses) and timeline_poses[i] is None:
+                i += 1
+            gap_end = i # index of next active pose (or end of list)
+            
+            # Set center of gap to REST_POSE
+            # Blend out from previous pose, and blend in to next pose
+            blend_frames = int(round((blend_rest_ms / 1000.0) / time_per_frame))
+            
+            # Left blend boundary
+            prev_pose = timeline_poses[gap_start - 1] if gap_start > 0 else REST_POSE
+            # Right blend boundary
+            next_pose = timeline_poses[gap_end] if gap_end < len(timeline_poses) else REST_POSE
+            
+            # Populate gap
+            for k in range(gap_start, gap_end):
+                dist_from_prev = k - gap_start + 1
+                dist_to_next = gap_end - k
+                
+                if dist_from_prev <= blend_frames and dist_to_next <= blend_frames:
+                    # Very short gap, blend directly between prev_pose and next_pose
+                    factor = float(dist_from_prev) / (gap_end - gap_start)
+                    timeline_poses[k] = {bone: q_nlerp(prev_pose.get(bone, [0.0,0.0,0.0,1.0]), next_pose.get(bone, [0.0,0.0,0.0,1.0]), factor) for bone in REST_POSE}
+                elif dist_from_prev <= blend_frames:
+                    # Blending out to REST_POSE
+                    factor = float(dist_from_prev) / blend_frames
+                    timeline_poses[k] = {bone: q_nlerp(prev_pose.get(bone, [0.0,0.0,0.0,1.0]), REST_POSE[bone], factor) for bone in REST_POSE}
+                elif dist_to_next <= blend_frames:
+                    # Blending in from REST_POSE
+                    factor = 1.0 - (float(dist_to_next) / blend_frames)
+                    timeline_poses[k] = {bone: q_nlerp(REST_POSE[bone], next_pose.get(bone, [0.0,0.0,0.0,1.0]), factor) for bone in REST_POSE}
+                else:
+                    # Stable rest pose in the middle of gap
+                    timeline_poses[k] = REST_POSE
+        else:
+            i += 1
+            
+    # Convert timeline to final output format
+    for frame_idx, pose in enumerate(timeline_poses):
+        t = frame_idx * time_per_frame
+        final_frames.append({
+            "time": round(t, 4),
+            "rotations": {k: [round(x, 5) for x in q] for k, q in pose.items()}
+        })
+        
+    return {
+        "fps": fps,
+        "duration": round(len(timeline_poses) * time_per_frame, 4),
+        "frames": final_frames
+    }
+
+# Retained for backwards compatibility/testing
+def map_keypoints_to_animation(pipeline_output_words, fps=30):
+    # Fallback/mock single caption block starting at 0
+    mock_block = {
+        "start": 0.0,
+        "end": sum([len(w.get("keypoints", [])) * (1.0/fps) if w.get("source") != "fingerspelling" else 1.5 for w in pipeline_output_words]),
+        "words": pipeline_output_words
+    }
+    return map_captions_to_animation([mock_block], fps)
 
 if __name__ == "__main__":
-    print("Testing Rig Mapper...")
-    # Get standard names
-    bone_map = get_avatar_bone_names()
-    print("Mapped standard names sample:")
-    print("  leftArm  ->", bone_map['leftArm'])
-    print("  rightArm ->", bone_map['rightArm'])
-    print("Rig Mapper ready.")
+    print("=== TESTING RIG MAPPER ===")
+    print("Resolved dynamic bone mapping:")
+    for k, v in RIG_MAP.items():
+        print(f"  {k}: {v}")

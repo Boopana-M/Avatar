@@ -1,348 +1,459 @@
-class ISLAvatarWidget {
-  constructor(videoUrl) {
-    this.videoUrl = videoUrl;
-    this.container = null;
-    this.canvas = null;
-    
-    // Three.js instances
-    this.renderer = null;
-    this.scene = null;
-    this.camera = null;
-    this.avatar = null;
-    this.bones = {}; // Maps generic names to actual THREE.Bone objects
-    
-    // Sync state
-    this.animationData = [];
-    this.videoElement = null;
-    this.isPlaying = false;
-    this.timeUpdateListener = null;
-    this.animationFrameId = null;
-    this.lastTime = -1;
-  }
+// overlay.js
 
-  init() {
-    this.createDOM();
-    this.initThreeJS();
-    this.loadData();
-    this.setupVideoSync();
-    
-    // Start animation loop
-    this.animate();
-  }
+let scene, camera, renderer, clock;
+let currentVrm = null;
+let animationData = null;
+let captionBlocks = null;
+let currentVideoTime = 0.0;
+let isPlaying = false;
 
-  createDOM() {
-    // 1. Container
-    this.container = document.createElement("div");
-    this.container.className = "isl-avatar-container";
-    
-    // 2. Control Bar / Header
-    const header = document.createElement("div");
-    header.className = "isl-avatar-header";
-    
-    const title = document.createElement("div");
-    title.className = "isl-avatar-title";
-    title.innerHTML = "🤟 ISL Avatar";
-    
-    const closeBtn = document.createElement("button");
-    closeBtn.className = "isl-avatar-close";
-    closeBtn.innerHTML = "×";
-    closeBtn.addEventListener("click", () => this.remove());
-    
-    header.appendChild(title);
-    header.appendChild(closeBtn);
-    this.container.appendChild(header);
-    
-    // 3. Canvas
-    this.canvas = document.createElement("canvas");
-    this.canvas.className = "isl-avatar-canvas";
-    this.container.appendChild(this.canvas);
-    
-    // 4. Loading Overlay
-    this.loader = document.createElement("div");
-    this.loader.className = "isl-avatar-loader";
-    
-    const spinner = document.createElement("div");
-    spinner.className = "isl-spinner";
-    
-    const loaderText = document.createElement("div");
-    loaderText.className = "isl-loader-text";
-    loaderText.innerText = "Extracting Captions...";
-    
-    const loaderSubtext = document.createElement("div");
-    loaderSubtext.className = "isl-loader-subtext";
-    loaderSubtext.innerText = "This might take a moment if ASR fallback runs.";
-    
-    this.loader.appendChild(spinner);
-    this.loader.appendChild(loaderText);
-    this.loader.appendChild(loaderSubtext);
-    this.container.appendChild(this.loader);
-    
-    // Append to body
-    document.body.appendChild(this.container);
-  }
+const log = (msg) => {
+  window.parent.postMessage({ type: "IFRAME_LOG", message: msg }, "*");
+};
 
-  setLoaderState(text, subtext = "") {
-    if (this.loader) {
-      const txtEl = this.loader.querySelector(".isl-loader-text");
-      const subEl = this.loader.querySelector(".isl-loader-subtext");
-      if (txtEl) txtEl.innerText = text;
-      if (subEl) subEl.innerText = subtext;
+// Initialize Three.js WebGL rendering environment
+function initThree() {
+  const container = document.getElementById("canvas-container");
+  
+  scene = new THREE.Scene();
+  
+  // Set up camera focused on character's upper body (waist-up)
+  camera = new THREE.PerspectiveCamera(35, container.clientWidth / container.clientHeight, 0.1, 20.0);
+  camera.position.set(0.0, 1.25, 0.95);
+  camera.lookAt(0.0, 1.2, 0.0);
+  
+  // Set up renderer with transparent background and antialiasing
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.shadowMap.enabled = true;
+  container.appendChild(renderer.domElement);
+  
+  // Set up lighting (vibrant and clear to highlight hand movements)
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+  scene.add(ambientLight);
+  
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+  dirLight.position.set(2.0, 4.0, 3.0);
+  scene.add(dirLight);
+  
+  const fillLight = new THREE.DirectionalLight(0xffffff, 0.3);
+  fillLight.position.set(-2.0, 2.0, 2.0);
+  scene.add(fillLight);
+  
+  clock = new THREE.Clock();
+  
+  // Start animate loop
+  animate();
+  
+  // Handle window resizing
+  window.addEventListener("resize", () => {
+    camera.aspect = container.clientWidth / container.clientHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(container.clientWidth, container.clientHeight);
+  });
+}
+
+// Render loop
+function animate() {
+  requestAnimationFrame(animate);
+  
+  const delta = clock.getDelta();
+  if (currentVrm) {
+    currentVrm.update(delta);
+    
+    // Apply animation rotations based on current play position
+    applyAnimationPose(currentVideoTime);
+  }
+  
+  renderer.render(scene, camera);
+}
+
+// Set up bone reference cache for instant access
+let boneNodesCache = {};
+function getBoneNode(boneName) {
+  if (boneNodesCache[boneName]) {
+    return boneNodesCache[boneName];
+  }
+  const node = scene.getObjectByName(boneName);
+  if (node) {
+    boneNodesCache[boneName] = node;
+  }
+  return node;
+}
+
+// Resets character back to the default rest pose
+function setRestPose() {
+  if (!currentVrm) return;
+  // Apply identity or rest pose values
+  const upperLeftArm = getBoneNode("J_Bip_L_UpperArm");
+  const upperRightArm = getBoneNode("J_Bip_R_UpperArm");
+  const lowerLeftArm = getBoneNode("J_Bip_L_LowerArm");
+  const lowerRightArm = getBoneNode("J_Bip_R_LowerArm");
+  
+  if (upperLeftArm) upperLeftArm.quaternion.set(0.0, 0.0, -0.64279, 0.76604);
+  if (upperRightArm) upperRightArm.quaternion.set(0.0, 0.0, 0.64279, 0.76604);
+  if (lowerLeftArm) lowerLeftArm.quaternion.set(0.0, 0.17365, 0.0, 0.98481);
+  if (lowerRightArm) lowerRightArm.quaternion.set(0.0, -0.17365, 0.0, 0.98481);
+}
+
+// Find close animation frame and update joints
+function applyAnimationPose(time) {
+  if (!animationData || !animationData.frames || animationData.frames.length === 0) {
+    return;
+  }
+  
+  const fps = animationData.fps || 30;
+  let frameIdx = Math.round(time * fps);
+  
+  // Clamp frame index
+  if (frameIdx < 0) frameIdx = 0;
+  if (frameIdx >= animationData.frames.length) {
+    frameIdx = animationData.frames.length - 1;
+  }
+  
+  const frame = animationData.frames[frameIdx];
+  if (frame && frame.rotations) {
+    // Apply each bone rotation
+    for (const [boneName, q] of Object.entries(frame.rotations)) {
+      const boneNode = getBoneNode(boneName);
+      if (boneNode) {
+        boneNode.quaternion.set(q[0], q[1], q[2], q[3]);
+      }
     }
   }
+  
+  // Update HUD text (Gloss / active words)
+  updateHUD(time);
+}
 
-  hideLoader() {
-    if (this.loader) {
-      this.loader.style.display = "none";
+// Update text display in HUD based on video time
+function updateHUD(time) {
+  if (!captionBlocks) return;
+  
+  let activeBlock = null;
+  for (const block of captionBlocks) {
+    if (time >= block.start && time <= block.end) {
+      activeBlock = block;
+      break;
     }
   }
-
-  showError(msg) {
-    if (this.loader) {
-      const spinner = this.loader.querySelector(".isl-spinner");
-      if (spinner) spinner.style.display = "none";
-      this.setLoaderState("Translation Error", msg);
-      this.loader.querySelector(".isl-loader-text").style.color = "#ff3838";
-    }
+  
+  const wordTextEl = document.getElementById("word-text");
+  const wordTierEl = document.getElementById("word-tier");
+  const statusIndicatorEl = document.getElementById("status-indicator");
+  const statusTextEl = document.getElementById("status-text");
+  
+  if (isPlaying) {
+    statusIndicatorEl.className = "status-indicator active";
+    statusTextEl.innerText = "SIGNING";
+  } else {
+    statusIndicatorEl.className = "status-indicator";
+    statusTextEl.innerText = "PAUSED";
   }
 
-  initThreeJS() {
-    const width = 320;
-    const height = 280;
+  if (activeBlock) {
+    // Determine which gloss word is active based on time elapsed in block
+    const words = activeBlock.words || [];
+    if (words.length > 0) {
+      const duration = activeBlock.end - activeBlock.start;
+      const elapsed = time - activeBlock.start;
+      const wordIdx = Math.min(
+        words.length - 1,
+        Math.floor((elapsed / duration) * words.length)
+      );
+      
+      const activeWord = words[wordIdx];
+      const wordStr = activeWord.word || "";
+      const source = activeWord.source || "unmatched";
+      const tier = activeWord.tier || 3;
+      
+      wordTextEl.innerText = wordStr;
+      wordTierEl.style.display = "inline-block";
+      
+      if (source === "fingerspelling") {
+        wordTierEl.className = "word-tier tier-spell";
+        wordTierEl.innerText = "Fingerspell (A-Z)";
+      } else if (source === "unmatched") {
+        wordTierEl.className = "word-tier tier-none";
+        wordTierEl.innerText = "Unmatched";
+      } else if (tier === 1) {
+        wordTierEl.className = "word-tier tier-exact";
+        wordTierEl.innerText = "Tier 1: Exact Sign";
+      } else {
+        wordTierEl.className = "word-tier tier-lemma";
+        wordTierEl.innerText = "Tier 2: Lemma Sign";
+      }
+    } else {
+      wordTextEl.innerText = activeBlock.text || "--";
+      wordTierEl.style.display = "none";
+    }
+  } else {
+    wordTextEl.innerText = "Idle";
+    wordTierEl.style.display = "none";
+  }
+}
+
+// Load VRM Avatar using GLTFLoader and THREE_VRM.VRMLoaderPlugin
+function loadAvatar() {
+  const msgEl = document.getElementById("loading-message");
+  msgEl.innerText = "Loading 3D Rig (avatar.vrm)...";
+  
+  try {
+    if (typeof THREE.GLTFLoader === "undefined") {
+      throw new Error("THREE.GLTFLoader is not defined. Ensure GLTFLoader.js is loaded correctly.");
+    }
+    if (typeof THREE_VRM === "undefined" || typeof THREE_VRM.VRMLoaderPlugin === "undefined") {
+      throw new Error("THREE_VRM.VRMLoaderPlugin is not defined. Ensure three-vrm.js v1.x+ is loaded correctly.");
+    }
+
+    const loader = new THREE.GLTFLoader();
     
-    // Scene
-    this.scene = new THREE.Scene();
-    
-    // Camera - focus on upper body (chest/head/hands)
-    this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
-    this.camera.position.set(0, 1.35, 1.25);
-    this.camera.lookAt(0, 1.35, 0);
-    
-    // Renderer
-    this.renderer = new THREE.WebGLRenderer({
-      canvas: this.canvas,
-      antialias: true,
-      alpha: true // Transparent background
+    // Register VRMLoaderPlugin to handle VRM extensions (VRMC_vrm)
+    loader.register((parser) => {
+      return new THREE_VRM.VRMLoaderPlugin(parser);
     });
-    this.renderer.setSize(width, height);
-    this.renderer.setPixelRatio(window.devicePixelRatio);
-    this.renderer.outputEncoding = THREE.sRGBEncoding;
-    this.renderer.shadowMap.enabled = true;
+
+    loader.load(
+      "http://localhost:8000/avatar.vrm",
+      (gltf) => {
+        try {
+          msgEl.innerText = "Initializing VRM Humanoid bones...";
+          
+          // Retrieve the VRM instance from gltf.userData
+          const vrm = gltf.userData.vrm;
+          if (!vrm) {
+            throw new Error("VRM instance not found in GLTF user data. Verify file integrity.");
+          }
+          
+          scene.add(vrm.scene);
+          currentVrm = vrm;
+          vrm.scene.rotation.y = 0.0; // Face the camera
+          
+          // Reset arms to resting pose
+          setRestPose();
+          
+          log("VRM model loaded successfully.");
+          checkInitializationComplete();
+        } catch (innerErr) {
+          msgEl.innerText = "VRM Initialization Error: " + innerErr.message;
+          log("VRM Initialization failed: " + innerErr);
+        }
+      },
+      (xhr) => {
+        if (xhr.total) {
+          const pct = Math.round((xhr.loaded / xhr.total) * 100);
+          msgEl.innerText = `Downloading Avatar Model: ${pct}%`;
+        }
+      },
+      (err) => {
+        msgEl.innerText = "Network Error loading VRM model. Make sure backend port 8000 is active.";
+        log("Network error loading VRM: " + err);
+      }
+    );
+  } catch (err) {
+    msgEl.innerText = "Failed to initiate avatar loader: " + err.message;
+    log("Loader initialization error: " + err);
+  }
+}
+
+let isVrmReady = false;
+let isPipelineReady = false;
+
+function checkInitializationComplete() {
+  const msgEl = document.getElementById("loading-message");
+  
+  if (currentVrm) {
+    isVrmReady = true;
+  }
+  
+  if (animationData) {
+    isPipelineReady = true;
+  }
+  
+  if (isVrmReady && isPipelineReady) {
+    // Fade out overlay
+    const overlay = document.getElementById("loading-overlay");
+    overlay.style.opacity = 0;
+    setTimeout(() => {
+      overlay.style.display = "none";
+    }, 500);
     
-    // Lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
-    this.scene.add(ambientLight);
+    // Set active status indicator
+    document.getElementById("status-indicator").className = "status-indicator active";
+    document.getElementById("status-text").innerText = "ACTIVE";
+  } else if (isVrmReady) {
+    msgEl.innerText = "Waiting for backend transcription & translation...";
+  }
+}
+
+let pollInterval = null;
+let receivedBlockIndices = new Set();
+let videoId = null;
+
+// Fetch ISL translation pipeline from FastAPI backend
+function fetchTranslation(videoUrl) {
+  const msgEl = document.getElementById("loading-message");
+  msgEl.innerText = "Querying backend translation pipeline (ASR/Captions/Gloss)...";
+  
+  if (pollInterval) {
+    clearInterval(pollInterval);
+    pollInterval = null;
+  }
+  receivedBlockIndices.clear();
+  videoId = null;
+
+  fetch("http://localhost:8000/translate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ video_url: videoUrl })
+  })
+  .then(res => {
+    if (!res.ok) {
+      throw new Error(`HTTP error! status: ${res.status}`);
+    }
+    return res.json();
+  })
+  .then(data => {
+    videoId = data.video_id;
     
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    dirLight.position.set(2, 4, 3);
-    this.scene.add(dirLight);
-    
-    const dirLight2 = new THREE.DirectionalLight(0xa6d5ff, 0.3); // Soft blue rim light
-    dirLight2.position.set(-2, 2, -2);
-    this.scene.add(dirLight2);
+    if (data.status === "completed") {
+      animationData = data.animation_data;
+      captionBlocks = data.caption_blocks || [];
+      log("Translation pipeline loaded from cache. Animation timeline ready.");
+      checkInitializationComplete();
+    } else {
+      if (data.caption_blocks && data.caption_blocks.length > 0) {
+        handleInitialCaptionBlocks(data.caption_blocks);
+      } else {
+        msgEl.innerText = "Waiting for backend transcription & translation...";
+      }
+      startPolling();
+    }
+  })
+  .catch(err => {
+    msgEl.innerText = "Error in Translation Pipeline: " + err.message + "\n(Verify Ollama is active & backend running)";
+    log("Translation request failed: " + err);
+  });
+}
+
+function handleInitialCaptionBlocks(blocks) {
+  captionBlocks = blocks;
+  
+  // Pre-allocate blank frames based on the last caption end time
+  const fps = 30;
+  const lastBlock = captionBlocks[captionBlocks.length - 1];
+  const totalDuration = lastBlock ? (lastBlock.end + 3.0) : 10.0;
+  
+  // Initialize JS rest pose
+  const JS_REST_POSE = {
+    "J_Bip_L_UpperArm": [0.0, 0.0, -0.64279, 0.76604],
+    "J_Bip_R_UpperArm": [0.0, 0.0, 0.64279, 0.76604],
+    "J_Bip_L_LowerArm": [0.0, 0.17365, 0.0, 0.98481],
+    "J_Bip_R_LowerArm": [0.0, -0.17365, 0.0, 0.98481],
+    "J_Bip_L_Hand": [0.0, 0.0, 0.0, 1.0],
+    "J_Bip_R_Hand": [0.0, 0.0, 0.0, 1.0]
+  };
+  const fingers = ["Thumb", "Index", "Middle", "Ring", "Little"];
+  for (const f of fingers) {
+    for (let suffix of ["1", "2", "3"]) {
+      JS_REST_POSE[`J_Bip_L_${f}${suffix}`] = [0.0, 0.0, 0.0, 1.0];
+      JS_REST_POSE[`J_Bip_R_${f}${suffix}`] = [0.0, 0.0, 0.0, 1.0];
+    }
   }
 
-  loadData() {
-    this.setLoaderState("Generating Gloss...", "Running English to ISL translator via local Ollama...");
+  const totalFrames = Math.round(totalDuration * fps);
+  const blankFrames = [];
+  for (let i = 0; i < totalFrames; i++) {
+    blankFrames.push({
+      time: i / fps,
+      rotations: JSON.parse(JSON.stringify(JS_REST_POSE))
+    });
+  }
+  
+  animationData = {
+    fps: fps,
+    duration: totalDuration,
+    frames: blankFrames
+  };
+  
+  log(`Pre-allocated ${totalFrames} frames for progressive updates.`);
+  checkInitializationComplete();
+}
+
+function startPolling() {
+  if (pollInterval) return;
+  
+  pollInterval = setInterval(() => {
+    if (!videoId) return;
     
-    // Request translation from local FastAPI server
-    fetch("http://localhost:8000/translate", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ youtube_url: this.videoUrl })
-    })
+    const receivedStr = Array.from(receivedBlockIndices).join(",");
+    fetch(`http://localhost:8000/translate/status?video_id=${videoId}&received_blocks=${receivedStr}`)
     .then(res => {
-      if (!res.ok) throw new Error("Server responded with code " + res.status);
+      if (!res.ok) throw new Error("Status check failed");
       return res.json();
     })
     .then(data => {
-      if (data.status !== "success") throw new Error(data.detail || "Translation failed");
-      
-      this.animationData = data.animation_data;
-      console.log(`[Overlay] Loaded ${this.animationData.length} frames of animation.`);
-      
-      // If unmatched words, display badge
-      if (data.unmatched_words && data.unmatched_words.length > 0) {
-        this.showUnmatchedBadge(data.unmatched_words);
+      if (data.caption_blocks && (!captionBlocks || captionBlocks.length === 0)) {
+        handleInitialCaptionBlocks(data.caption_blocks);
       }
       
-      // Load avatar model
-      this.loadAvatarModel();
+      // Process new blocks
+      if (data.new_blocks && data.new_blocks.length > 0) {
+        data.new_blocks.forEach(block => {
+          receivedBlockIndices.add(block.block_idx);
+          
+          if (block.frames && animationData) {
+            const fps = animationData.fps || 30;
+            block.frames.forEach(frame => {
+              const frameIdx = Math.round(frame.time * fps);
+              if (frameIdx >= 0 && frameIdx < animationData.frames.length) {
+                animationData.frames[frameIdx].rotations = frame.rotations;
+              }
+            });
+          }
+          
+          if (captionBlocks && captionBlocks[block.block_idx]) {
+            captionBlocks[block.block_idx].words = block.words;
+          }
+          
+          log(`Progressive update: Applied animation for caption block ${block.block_idx}`);
+        });
+      }
+      
+      if (data.status === "completed") {
+        log("Progressive translation fully completed.");
+        clearInterval(pollInterval);
+        pollInterval = null;
+      } else if (data.status === "failed") {
+        log(`Backend task failed: ${data.error}`);
+        clearInterval(pollInterval);
+        pollInterval = null;
+        const msgEl = document.getElementById("loading-message");
+        if (msgEl) {
+          msgEl.innerText = "Error in Translation Pipeline: " + data.error;
+        }
+      }
     })
     .catch(err => {
-      console.error("[Overlay] Translation request failed:", err);
-      this.showError(err.message + ". Make sure backend is running at http://localhost:8000");
+      log("Error during polling: " + err);
     });
-  }
-
-  showUnmatchedBadge(words) {
-    const badge = document.createElement("div");
-    badge.className = "isl-unmatched-badge";
-    badge.title = "These words do not have recorded signs in INCLUDE dataset: " + words.join(", ");
-    badge.innerText = `⚠️ ${words.length} unmatched words`;
-    this.container.appendChild(badge);
-  }
-
-  loadAvatarModel() {
-    this.setLoaderState("Loading Avatar...", "Downloading GLB model from http://localhost:8000/models/avatar.glb");
-    
-    const loader = new THREE.GLTFLoader();
-    const avatarUrl = "http://localhost:8000/models/avatar.glb";
-    
-    loader.load(avatarUrl, (gltf) => {
-      this.avatar = gltf.scene;
-      
-      // Position character chest height
-      this.avatar.position.set(0, 0, 0);
-      this.scene.add(this.avatar);
-      
-      // Map skeleton bones
-      this.mapSkeletonBones();
-      
-      this.hideLoader();
-      console.log("[Overlay] Avatar model loaded successfully!");
-    }, 
-    (xhr) => {
-      if (xhr.total > 0) {
-        const percent = Math.round((xhr.loaded / xhr.total) * 100);
-        this.setLoaderState("Loading Avatar...", `Downloaded ${percent}%`);
-      }
-    },
-    (err) => {
-      console.error("[Overlay] Failed to load avatar GLB:", err);
-      this.showError("avatar.glb not found. Make sure models/avatar.glb exists on the backend server.");
-    });
-  }
-
-  mapSkeletonBones() {
-    const standardRPMBones = [
-      "LeftArm", "LeftForeArm", "LeftHand",
-      "RightArm", "RightForeArm", "RightHand",
-      "LeftHandThumb1", "LeftHandThumb2", "LeftHandThumb3",
-      "LeftHandIndex1", "LeftHandIndex2", "LeftHandIndex3",
-      "LeftHandMiddle1", "LeftHandMiddle2", "LeftHandMiddle3",
-      "LeftHandRing1", "LeftHandRing2", "LeftHandRing3",
-      "LeftHandPinky1", "LeftHandPinky2", "LeftHandPinky3",
-      "RightHandThumb1", "RightHandThumb2", "RightHandThumb3",
-      "RightHandIndex1", "RightHandIndex2", "RightHandIndex3",
-      "RightHandMiddle1", "RightHandMiddle2", "RightHandMiddle3",
-      "RightHandRing1", "RightHandRing2", "RightHandRing3",
-      "RightHandPinky1", "RightHandPinky2", "RightHandPinky3"
-    ];
-    
-    this.bones = {};
-    
-    this.avatar.traverse((child) => {
-      if (child.isBone) {
-        const boneName = child.name;
-        // Search if this bone name contains any of the standard names case-insensitively
-        for (const stdName of standardRPMBones) {
-          if (boneName.toLowerCase().endsWith(stdName.toLowerCase()) || 
-              boneName.toLowerCase().includes(stdName.toLowerCase())) {
-            this.bones[stdName] = child;
-          }
-        }
-      }
-    });
-    
-    console.log(`[Overlay] Mapped ${Object.keys(this.bones).length} skeleton bones.`);
-  }
-
-  setupVideoSync() {
-    this.videoElement = document.querySelector("video");
-    if (!this.videoElement) {
-      console.warn("[Overlay] Could not find YouTube video element.");
-      return;
-    }
-    
-    // Sync to video time changes
-    this.timeUpdateListener = () => {
-      if (this.videoElement) {
-        const currentTime = this.videoElement.currentTime;
-        this.updatePose(currentTime);
-      }
-    };
-    
-    this.videoElement.addEventListener("timeupdate", this.timeUpdateListener);
-  }
-
-  updatePose(currentTime) {
-    if (this.animationData.length === 0 || !this.avatar) return;
-    
-    // Find animation frame closest to current time
-    // Since animationData is sorted by time, we can binary search or simple sweep
-    let bestFrame = null;
-    let minDiff = Infinity;
-    
-    for (const frame of this.animationData) {
-      const diff = Math.abs(frame.time - currentTime);
-      if (diff < minDiff && diff < 0.5) { // Ensure within 0.5s of caption block
-        minDiff = diff;
-        bestFrame = frame;
-      }
-    }
-    
-    // Apply rotations
-    if (bestFrame) {
-      const rotations = bestFrame.rotations;
-      for (const [boneKey, rotQuat] of Object.entries(rotations)) {
-        // Map generic key to standard mapped bone name
-        // The rotations dictionary keys match what was output by rig_mapper.py,
-        // which matches the keys inside get_avatar_bone_names(), e.g. LeftArm, RightHandThumb1
-        const bone = this.bones[boneKey];
-        if (bone) {
-          // Set bone rotation quaternion
-          bone.quaternion.set(rotQuat[0], rotQuat[1], rotQuat[2], rotQuat[3]);
-        }
-      }
-    } else {
-      // Return to default T-pose (idle state) if no active sign frame is nearby
-      this.resetToTPose();
-    }
-  }
-
-  resetToTPose() {
-    if (!this.bones) return;
-    for (const bone of Object.values(this.bones)) {
-      bone.quaternion.set(0, 0, 0, 1);
-    }
-  }
-
-  animate() {
-    this.animationFrameId = requestAnimationFrame(() => this.animate());
-    
-    if (this.renderer && this.scene && this.camera) {
-      this.renderer.render(this.scene, this.camera);
-    }
-  }
-
-  toggle() {
-    if (this.container) {
-      const isHidden = this.container.style.display === "none";
-      this.container.style.display = isHidden ? "flex" : "none";
-    }
-  }
-
-  remove() {
-    // Stop animation loops
-    if (this.animationFrameId) {
-      cancelAnimationFrame(this.animationFrameId);
-    }
-    
-    // Clean up event listeners
-    if (this.videoElement && this.timeUpdateListener) {
-      this.videoElement.removeEventListener("timeupdate", this.timeUpdateListener);
-    }
-    
-    // Remove element
-    if (this.container) {
-      this.container.remove();
-    }
-    
-    // Clean up WebGL
-    if (this.renderer) {
-      this.renderer.dispose();
-    }
-  }
+  }, 2000);
 }
+
+// Listen to sync messages from content_script
+window.addEventListener("message", (event) => {
+  const data = event.data;
+  if (!data) return;
+  
+  if (data.type === "INIT") {
+    log(`Initializing iframe for URL: ${data.videoUrl}`);
+    initThree();
+    loadAvatar();
+    fetchTranslation(data.videoUrl);
+  } else if (data.type === "SYNC") {
+    currentVideoTime = data.time;
+    isPlaying = data.playing;
+  }
+});

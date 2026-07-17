@@ -1,83 +1,85 @@
 import os
+import sys
+import tempfile
 import yt_dlp
 import whisper
 
-def transcribe_audio(youtube_url: str) -> list:
+def transcribe_audio(youtube_url, model_name="base"):
     """
-    Downloads audio from the given YouTube URL and transcribes it using local OpenAI Whisper.
+    Downloads audio from a YouTube URL and transcribes it using local openai-whisper.
     Returns:
-        list of dict: [{'start': float, 'end': float, 'text': str}]
+        List of dicts: [{'start': float, 'end': float, 'text': str}]
     """
-    # Define cache directory inside workspace
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    cache_dir = os.path.join(base_dir, "backend", "cache")
-    os.makedirs(cache_dir, exist_ok=True)
+    # Use a temp directory inside the workspace to avoid writing outside it
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    workspace_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+    temp_dir = os.path.join(workspace_root, "tmp")
+    os.makedirs(temp_dir, exist_ok=True)
     
-    print(f"[ASR] Downloading audio from: {youtube_url}")
-    
-    # Configure yt-dlp to download and convert to MP3
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'outtmpl': os.path.join(cache_dir, '%(id)s.%(ext)s'),
-        'quiet': True,
-        'no_warnings': True,
-    }
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=True)
-            video_id = info['id']
-            audio_path = os.path.join(cache_dir, f"{video_id}.mp3")
+    with tempfile.TemporaryDirectory(dir=temp_dir) as tmpdir:
+        out_template = os.path.join(tmpdir, "audio.%(ext)s")
+        
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': out_template,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'wav',
+                'preferredquality': '192',
+            }],
+            'quiet': True,
+            'no_warnings': True,
+        }
+        
+        print(f"Downloading audio from {youtube_url}...")
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([youtube_url])
+        except Exception as e:
+            raise Exception(f"Failed to download audio using yt-dlp: {str(e)}")
             
-        print(f"[ASR] Audio downloaded to {audio_path}")
-        
-        # Load local whisper model (using tiny for speed and low memory usage)
-        print("[ASR] Loading Whisper model 'tiny'...")
-        model = whisper.load_model("tiny")
-        
-        print("[ASR] Transcribing audio...")
-        result = model.transcribe(audio_path, language="en")
-        
-        formatted_captions = []
-        for segment in result.get('segments', []):
-            formatted_captions.append({
-                'start': float(segment['start']),
-                'end': float(segment['end']),
-                'text': segment['text'].strip()
-            })
+        audio_path = os.path.join(tmpdir, "audio.wav")
+        if not os.path.exists(audio_path):
+            raise Exception("Downloaded audio file was not found or failed to convert to WAV.")
             
-        print(f"[ASR] Transcription complete. Extracted {len(formatted_captions)} segments.")
-        
-        # Clean up downloaded audio file to save disk space
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
-            print("[ASR] Cleaned up temporary audio file.")
+        print(f"Loading Whisper model '{model_name}' (this might take a moment to download on first run)...")
+        try:
+            model = whisper.load_model(model_name)
+        except Exception as e:
+            raise Exception(f"Failed to load Whisper model: {str(e)}")
             
-        return formatted_captions
-        
-    except Exception as e:
-        print(f"[ASR] Error during audio transcription fallback: {e}")
-        # Clean up in case of error
-        if 'video_id' in locals():
-            path_to_clean = os.path.join(cache_dir, f"{video_id}.mp3")
-            if os.path.exists(path_to_clean):
-                os.remove(path_to_clean)
-        raise e
+        print("Transcribing audio...")
+        try:
+            # Transcribe audio with Whisper
+            result = model.transcribe(audio_path)
+        except Exception as e:
+            raise Exception(f"Failed to transcribe audio: {str(e)}")
+            
+        captions = []
+        for segment in result.get("segments", []):
+            start = segment.get("start", 0.0)
+            end = segment.get("end", 0.0)
+            text = segment.get("text", "").strip()
+            if text:
+                captions.append({
+                    "start": round(start, 3),
+                    "end": round(end, 3),
+                    "text": text
+                })
+        return captions
 
 if __name__ == "__main__":
-    # Test on a short video (e.g. a 5-second video or similar)
-    # Using a short test video: https://www.youtube.com/watch?v=jNQXAC9IVRw (Me at the zoo - 19 seconds)
+    # Test on a short, public YouTube video: "Me at the zoo" (19 seconds)
     test_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
-    print(f"Testing ASR fallback with: {test_url}")
+    print(f"Testing ASR fallback retrieval for: {test_url}")
     try:
-        caps = transcribe_audio(test_url)
-        print("\nTranscription output:")
-        for cap in caps:
-            print(f"  [{cap['start']:.2f}s - {cap['end']:.2f}s]: {cap['text']}")
+        # Use "tiny" model for faster test execution in CPU environments
+        caps = transcribe_audio(test_url, model_name="tiny")
+        print(f"Successfully transcribed {len(caps)} segments.")
+        for entry in caps:
+            # Safe print for Windows terminal encoding
+            safe_text = entry['text'].encode('ascii', errors='replace').decode('ascii')
+            print(f"  [{entry['start']:.2f}s - {entry['end']:.2f}s]: {safe_text}")
     except Exception as e:
-        print(f"Test failed: {e}")
+        print(f"ASR fallback test failed: {e}")
+        sys.exit(1)

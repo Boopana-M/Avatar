@@ -1,83 +1,74 @@
 import re
-import urllib.parse
+import sys
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 
-class CaptionsNotFoundError(Exception):
-    """Custom exception raised when captions are not available for a video."""
-    pass
+def extract_video_id(youtube_url):
+    """
+    Extracts the 11-character YouTube video ID from various YouTube URL formats.
+    """
+    patterns = [
+        r'(?:v=|\/v\/|embed\/|shorts\/|youtu\.be\/|\/embed\/|\/watch\?v=|\/shorts\/)([a-zA-Z0-9_-]{11})'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, youtube_url)
+        if match:
+            return match.group(1)
+            
+    # Check if the URL is already an 11-char ID
+    if len(youtube_url) == 11 and re.match(r'^[a-zA-Z0-9_-]{11}$', youtube_url):
+        return youtube_url
+        
+    raise ValueError(f"Could not extract YouTube video ID from URL: {youtube_url}")
 
-def extract_video_id(url: str) -> str:
+def get_captions(youtube_url):
     """
-    Extracts the video ID from various YouTube URL formats.
-    """
-    parsed = urllib.parse.urlparse(url)
-    if parsed.hostname in ('youtu.be', 'www.youtu.be'):
-        return parsed.path[1:]
-    if parsed.hostname in ('youtube.com', 'www.youtube.com', 'm.youtube.com'):
-        if parsed.path == '/watch':
-            p = urllib.parse.parse_qs(parsed.query)
-            return p.get('v', [None])[0]
-        if parsed.path.startswith(('/embed/', '/v/', '/shorts/')):
-            return parsed.path.split('/')[2]
-    # Fallback regex search
-    match = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11}).*', url)
-    if match:
-        return match.group(1)
-    raise ValueError(f"Could not extract YouTube video ID from URL: {url}")
-
-def get_captions(youtube_url: str) -> list:
-    """
-    Retrieves captions for a given YouTube video URL.
+    Retrieves captions for a given YouTube URL.
     Returns:
-        list of dict: [{'start': float, 'end': float, 'text': str}]
+        List of dicts: [{'start': float, 'end': float, 'text': str}]
     Raises:
-        CaptionsNotFoundError: if captions are disabled or unavailable.
+        Exception: If captions are disabled or do not exist.
     """
+    video_id = extract_video_id(youtube_url)
+    api = YouTubeTranscriptApi()
     try:
-        video_id = extract_video_id(youtube_url)
-        print(f"[Captions] Fetching captions for video ID: {video_id}")
-        
-        # Instantiate YouTubeTranscriptApi and fetch English captions
-        api = YouTubeTranscriptApi()
+        # Attempt to fetch English transcripts (including manual and auto-generated)
+        transcript_list = api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
+    except (TranscriptsDisabled, NoTranscriptFound):
         try:
-            data = api.fetch(video_id, languages=['en', 'en-US'])
-        except Exception as e:
-            # Try to list and find English if direct fetch fails
-            try:
-                transcript_list = api.list(video_id)
-                transcript = transcript_list.find_transcript(['en', 'en-US'])
-                data = transcript.fetch()
-            except Exception:
-                raise CaptionsNotFoundError("No English captions found.")
-            
-        formatted_captions = []
-        for entry in data:
-            start = float(entry.start)
-            duration = float(entry.duration)
-            end = round(start + duration, 2)
-            formatted_captions.append({
-                'start': start,
-                'end': end,
-                'text': entry.text.replace('\n', ' ').strip()
-            })
-            
-        print(f"[Captions] Successfully retrieved {len(formatted_captions)} caption entries.")
-        return formatted_captions
-        
+            # Fallback to default (usually lists first available or fails)
+            # In some versions, fetch() requires list of languages, so let's try calling list().find_transcript().fetch()
+            # or just api.fetch(video_id)
+            transcript_list = api.fetch(video_id)
+        except Exception as inner_e:
+            raise Exception(f"No captions exist or transcripts are disabled for video {video_id}: {str(inner_e)}")
     except Exception as e:
-        print(f"[Captions] Failed to retrieve captions: {e}")
-        raise CaptionsNotFoundError(f"Captions unavailable or disabled: {e}")
+        raise Exception(f"Failed to retrieve captions for video {video_id}: {str(e)}")
+        
+    captions = []
+    for entry in transcript_list:
+        start = entry.start
+        duration = entry.duration
+        end = start + duration
+        text = entry.text
+        captions.append({
+            'start': round(start, 3),
+            'end': round(end, 3),
+            'text': text.strip().replace('\n', ' ')
+        })
+    return captions
 
 if __name__ == "__main__":
-    # Test with a well-known captioned YouTube video: "Charlie at the Chocolate Factory" trailer or similar
-    # Using a classic captioned video: https://www.youtube.com/watch?v=9bZkp7q19f0 (PSY - GANGNAM STYLE has captions, or standard tech reviews)
-    test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ" # Rick Roll usually has English captions
-    print(f"Testing caption extraction with: {test_url}")
+    # Test block on a known captioned video (e.g., Rick Astley - Never Gonna Give You Up)
+    test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    print(f"Testing captions retrieval for: {test_url}")
     try:
         caps = get_captions(test_url)
-        print("\nFirst 5 caption entries:")
-        for cap in caps[:5]:
-            safe_text = cap['text'].encode('ascii', errors='replace').decode('ascii')
-            print(f"  [{cap['start']:.2f}s - {cap['end']:.2f}s]: {safe_text}")
+        print(f"Successfully retrieved {len(caps)} caption blocks.")
+        print("First 5 caption entries:")
+        for entry in caps[:5]:
+            # Print using safe encoding for console representation
+            safe_text = entry['text'].encode('ascii', errors='replace').decode('ascii')
+            print(f"  [{entry['start']:.2f}s - {entry['end']:.2f}s]: {safe_text}")
     except Exception as e:
         print(f"Test failed: {e}")
+        sys.exit(1)

@@ -72,13 +72,67 @@ function animate() {
 
 // Set up bone reference cache for instant access
 let boneNodesCache = {};
+const J_BIP_TO_VRM_HUMAN_BONE = {
+  "J_Bip_L_UpperArm": "leftUpperArm",
+  "J_Bip_L_LowerArm": "leftLowerArm",
+  "J_Bip_L_Hand": "leftHand",
+  "J_Bip_R_UpperArm": "rightUpperArm",
+  "J_Bip_R_LowerArm": "rightLowerArm",
+  "J_Bip_R_Hand": "rightHand",
+  "J_Bip_L_Thumb1": "leftThumbMetacarpal",
+  "J_Bip_L_Thumb2": "leftThumbProximal",
+  "J_Bip_L_Thumb3": "leftThumbDistal",
+  "J_Bip_R_Thumb1": "rightThumbMetacarpal",
+  "J_Bip_R_Thumb2": "rightThumbProximal",
+  "J_Bip_R_Thumb3": "rightThumbDistal",
+  "J_Bip_L_Index1": "leftIndexProximal",
+  "J_Bip_L_Index2": "leftIndexIntermediate",
+  "J_Bip_L_Index3": "leftIndexDistal",
+  "J_Bip_R_Index1": "rightIndexProximal",
+  "J_Bip_R_Index2": "rightIndexIntermediate",
+  "J_Bip_R_Index3": "rightIndexDistal",
+  "J_Bip_L_Middle1": "leftMiddleProximal",
+  "J_Bip_L_Middle2": "leftMiddleIntermediate",
+  "J_Bip_L_Middle3": "leftMiddleDistal",
+  "J_Bip_R_Middle1": "rightMiddleProximal",
+  "J_Bip_R_Middle2": "rightMiddleIntermediate",
+  "J_Bip_R_Middle3": "rightMiddleDistal",
+  "J_Bip_L_Ring1": "leftRingProximal",
+  "J_Bip_L_Ring2": "leftRingIntermediate",
+  "J_Bip_L_Ring3": "leftRingDistal",
+  "J_Bip_R_Ring1": "rightRingProximal",
+  "J_Bip_R_Ring2": "rightRingIntermediate",
+  "J_Bip_R_Ring3": "rightRingDistal",
+  "J_Bip_L_Little1": "leftLittleProximal",
+  "J_Bip_L_Little2": "leftLittleIntermediate",
+  "J_Bip_L_Little3": "leftLittleDistal",
+  "J_Bip_R_Little1": "rightLittleProximal",
+  "J_Bip_R_Little2": "rightLittleIntermediate",
+  "J_Bip_R_Little3": "rightLittleDistal"
+};
+
 function getBoneNode(boneName) {
-  if (boneNodesCache[boneName]) {
+  if (Object.prototype.hasOwnProperty.call(boneNodesCache, boneName)) {
     return boneNodesCache[boneName];
   }
-  const node = scene.getObjectByName(boneName);
+  if (!currentVrm || !currentVrm.scene) {
+    return null;
+  }
+  
+  let node = null;
+  const humanBoneName = J_BIP_TO_VRM_HUMAN_BONE[boneName];
+  if (humanBoneName && currentVrm.humanoid && currentVrm.humanoid.getRawBoneNode) {
+    node = currentVrm.humanoid.getRawBoneNode(humanBoneName);
+  }
+  if (!node) {
+    node = currentVrm.scene.getObjectByName(boneName);
+  }
+  
   if (node) {
     boneNodesCache[boneName] = node;
+  } else {
+    boneNodesCache[boneName] = null;
+    log(`WARNING: Bone node '${boneName}' not found in VRM humanoid or scene.`);
   }
   return node;
 }
@@ -97,6 +151,8 @@ function setRestPose() {
   if (lowerLeftArm) lowerLeftArm.quaternion.set(0.0, 0.17365, 0.0, 0.98481);
   if (lowerRightArm) lowerRightArm.quaternion.set(0.0, -0.17365, 0.0, 0.98481);
 }
+
+let lastIndex1RotStr = "";
 
 // Find close animation frame and update joints
 function applyAnimationPose(time) {
@@ -120,6 +176,16 @@ function applyAnimationPose(time) {
       const boneNode = getBoneNode(boneName);
       if (boneNode) {
         boneNode.quaternion.set(q[0], q[1], q[2], q[3]);
+        boneNode.updateMatrixWorld(true);
+        
+        // Log changes to J_Bip_R_Index1 to prove bones are being driven
+        if (boneName === "J_Bip_R_Index1") {
+          const rotStr = `[${q[0].toFixed(4)}, ${q[1].toFixed(4)}, ${q[2].toFixed(4)}, ${q[3].toFixed(4)}]`;
+          if (rotStr !== lastIndex1RotStr) {
+            lastIndex1RotStr = rotStr;
+            log(`DRIVE_BONE: J_Bip_R_Index1 rotation changed at t=${time.toFixed(2)}s (frame ${frameIdx}) to ${rotStr}`);
+          }
+        }
       }
     }
   }
@@ -186,7 +252,7 @@ function updateHUD(time) {
         wordTierEl.innerText = "Tier 2: Lemma Sign";
       }
     } else {
-      wordTextEl.innerText = activeBlock.text || "--";
+      wordTextEl.innerText = "Translating...";
       wordTierEl.style.display = "none";
     }
   } else {
@@ -229,6 +295,10 @@ function loadAvatar() {
           
           scene.add(vrm.scene);
           currentVrm = vrm;
+          if (currentVrm.humanoid) {
+            currentVrm.humanoid.autoUpdateHumanBones = false;
+          }
+          boneNodesCache = {};
           vrm.scene.rotation.y = 0.0; // Face the camera
           
           // Reset arms to resting pose
@@ -320,7 +390,7 @@ function fetchTranslation(videoUrl) {
     
     if (data.status === "completed") {
       animationData = data.animation_data;
-      captionBlocks = data.caption_blocks || [];
+      captionBlocks = normalizeCaptionBlocks(data.caption_blocks, data.gloss_sequence, animationData);
       log("Translation pipeline loaded from cache. Animation timeline ready.");
       checkInitializationComplete();
     } else {
@@ -339,7 +409,7 @@ function fetchTranslation(videoUrl) {
 }
 
 function handleInitialCaptionBlocks(blocks) {
-  captionBlocks = blocks;
+  captionBlocks = normalizeCaptionBlocks(blocks, [], null);
   
   // Pre-allocate blank frames based on the last caption end time
   const fps = 30;
@@ -380,6 +450,31 @@ function handleInitialCaptionBlocks(blocks) {
   
   log(`Pre-allocated ${totalFrames} frames for progressive updates.`);
   checkInitializationComplete();
+}
+
+function normalizeCaptionBlocks(blocks, glossSequence, anim) {
+  if (blocks && blocks.length > 0) {
+    return blocks.map(block => ({
+      ...block,
+      words: block.words || []
+    }));
+  }
+  
+  if (glossSequence && glossSequence.length > 0) {
+    const duration = (anim && anim.duration) || 10.0;
+    return [{
+      start: 0.0,
+      end: duration,
+      text: glossSequence.join(" "),
+      words: glossSequence.map(word => ({
+        word,
+        tier: 3,
+        source: "unknown"
+      }))
+    }];
+  }
+  
+  return [];
 }
 
 function startPolling() {

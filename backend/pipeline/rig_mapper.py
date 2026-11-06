@@ -121,7 +121,7 @@ def discover_rig_mapping():
 RIG_MAP = discover_rig_mapping()
 
 # Natural resting/idle pose rotations
-# Instead of T-pose, arms hang down along the torso, slightly bent
+# Instead of T-pose, arms hang down along the torso, slightly bent with relaxed fingers
 REST_POSE = {
     RIG_MAP["L_UpperArm"]: [0.0, 0.0, -0.64279, 0.76604], # ~80 degrees down around Z
     RIG_MAP["R_UpperArm"]: [0.0, 0.0, 0.64279, 0.76604],  # ~80 degrees down around Z
@@ -131,10 +131,12 @@ REST_POSE = {
     RIG_MAP["R_Hand"]: [0.0, 0.0, 0.0, 1.0],
 }
 
-# Fill other joints with identity in rest pose
-for finger_list in [RIG_MAP[f"L_{f}"] + RIG_MAP[f"R_{f}"] for f in ["Thumb", "Index", "Middle", "Ring", "Little"]]:
-    for bone in finger_list:
-        REST_POSE[bone] = [0.0, 0.0, 0.0, 1.0]
+# Fill finger joints with natural slight relaxed flexions
+for f in ["Thumb", "Index", "Middle", "Ring", "Little"]:
+    for bone in RIG_MAP[f"L_{f}"]:
+        REST_POSE[bone] = [0.0, -0.15, 0.0, 0.988] if "Thumb" not in f else [0.0, 0.0, 0.0, 1.0]
+    for bone in RIG_MAP[f"R_{f}"]:
+        REST_POSE[bone] = [0.0, 0.15, 0.0, 0.988] if "Thumb" not in f else [0.0, 0.0, 0.0, 1.0]
 
 def map_single_frame(frame_keypoints):
     """

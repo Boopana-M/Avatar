@@ -10,6 +10,7 @@ mp_hands = mp.solutions.hands
 def extract_video_keypoints(video_path):
     """
     Extracts pose, left hand, and right hand keypoints frame-by-frame from a video.
+    Includes wrist crop ROI fallback using MediaPipe Hands for low-resolution videos.
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -20,14 +21,19 @@ def extract_video_keypoints(video_path):
     with mp_holistic.Holistic(
         static_image_mode=False, 
         model_complexity=1, 
-        min_detection_confidence=0.5, 
-        min_tracking_confidence=0.5
-    ) as holistic:
+        min_detection_confidence=0.3, 
+        min_tracking_confidence=0.3
+    ) as holistic, mp_hands.Hands(
+        static_image_mode=True,
+        max_num_hands=2,
+        min_detection_confidence=0.1
+    ) as hands_detector:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
                 
+            h_img, w_img, _ = frame.shape
             image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = holistic.process(image_rgb)
             
@@ -44,15 +50,49 @@ def extract_video_keypoints(video_path):
             if results.left_hand_landmarks:
                 for lm in results.left_hand_landmarks.landmark:
                     left_hand_list.append([lm.x, lm.y, lm.z])
-            else:
-                left_hand_list = [[0.0, 0.0, 0.0] for _ in range(21)]
-                
+                    
             # Extract Right Hand (21 landmarks)
             right_hand_list = []
             if results.right_hand_landmarks:
                 for lm in results.right_hand_landmarks.landmark:
                     right_hand_list.append([lm.x, lm.y, lm.z])
-            else:
+                    
+            # Wrist crop ROI fallback for missing hand landmarks on low-res frames
+            if not right_hand_list and results.pose_landmarks:
+                rw = results.pose_landmarks.landmark[16]
+                if rw.visibility > 0.1:
+                    cx, cy = int(rw.x * w_img), int(rw.y * h_img)
+                    box_w = max(60, int(w_img * 0.35))
+                    x1, y1 = max(0, cx - box_w), max(0, cy - box_w)
+                    x2, y2 = min(w_img, cx + box_w), min(h_img, cy + box_w)
+                    crop = image_rgb[y1:y2, x1:x2]
+                    if crop.size > 0:
+                        h_res = hands_detector.process(crop)
+                        if h_res.multi_hand_landmarks:
+                            for lm in h_res.multi_hand_landmarks[0].landmark:
+                                norm_x = (x1 + lm.x * (x2 - x1)) / w_img
+                                norm_y = (y1 + lm.y * (y2 - y1)) / h_img
+                                right_hand_list.append([norm_x, norm_y, lm.z])
+
+            if not left_hand_list and results.pose_landmarks:
+                lw = results.pose_landmarks.landmark[15]
+                if lw.visibility > 0.1:
+                    cx, cy = int(lw.x * w_img), int(lw.y * h_img)
+                    box_w = max(60, int(w_img * 0.35))
+                    x1, y1 = max(0, cx - box_w), max(0, cy - box_w)
+                    x2, y2 = min(w_img, cx + box_w), min(h_img, cy + box_w)
+                    crop = image_rgb[y1:y2, x1:x2]
+                    if crop.size > 0:
+                        h_res = hands_detector.process(crop)
+                        if h_res.multi_hand_landmarks:
+                            for lm in h_res.multi_hand_landmarks[0].landmark:
+                                norm_x = (x1 + lm.x * (x2 - x1)) / w_img
+                                norm_y = (y1 + lm.y * (y2 - y1)) / h_img
+                                left_hand_list.append([norm_x, norm_y, lm.z])
+
+            if not left_hand_list:
+                left_hand_list = [[0.0, 0.0, 0.0] for _ in range(21)]
+            if not right_hand_list:
                 right_hand_list = [[0.0, 0.0, 0.0] for _ in range(21)]
                 
             frames_keypoints.append({

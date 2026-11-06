@@ -84,16 +84,43 @@ def get_cached_translation(video_id: str):
         row = cursor.fetchone()
         conn.close()
         if row:
+            if not row[0] or not row[1] or not row[2]:
+                safe_log(f"Cache row for {video_id} is incomplete; ignoring.")
+                return None
+            gloss_sequence = json.loads(row[0])
+            animation_data = json.loads(row[1])
+            caption_blocks = json.loads(row[4]) if len(row) > 4 and row[4] else []
+            if not caption_blocks and gloss_sequence and animation_data:
+                caption_blocks = synthesize_caption_blocks_from_gloss(gloss_sequence, animation_data)
             return {
-                "gloss_sequence": json.loads(row[0]),
-                "animation_data": json.loads(row[1]),
+                "gloss_sequence": gloss_sequence,
+                "animation_data": animation_data,
                 "unmatched_list": json.loads(row[2]),
                 "tier_info": json.loads(row[3]),
-                "caption_blocks": json.loads(row[4]) if len(row) > 4 and row[4] else []
+                "caption_blocks": caption_blocks
             }
     except Exception as e:
         safe_log(f"Cache read error: {e}")
     return None
+
+def synthesize_caption_blocks_from_gloss(gloss_sequence, animation_data):
+    """
+    Builds a gloss-only display timeline for older cache rows that predate
+    caption_blocks. This prevents the extension from falling back to English.
+    """
+    if not gloss_sequence:
+        return []
+    duration = float(animation_data.get("duration") or 0.0)
+    if duration <= 0.0:
+        frames = animation_data.get("frames") or []
+        duration = float(frames[-1].get("time", 0.0)) if frames else float(len(gloss_sequence))
+    words = [{"word": word, "tier": 3, "source": "unknown"} for word in gloss_sequence]
+    return [{
+        "start": 0.0,
+        "end": max(duration, 0.1),
+        "text": " ".join(gloss_sequence),
+        "words": words
+    }]
 
 def set_cached_translation(video_id: str, data: dict):
     try:
@@ -204,13 +231,9 @@ def run_translation_pipeline(video_id: str, youtube_url: str):
                 gloss_text = generate_gloss(text)
                 safe_log(f"  Gloss: {gloss_text}")
             except Exception as gloss_err:
-                safe_log(f"  Gloss generation failed for '{text}': {gloss_err}")
-                processed_blocks[idx] = {
-                    "start": block["start"],
-                    "end": block["end"],
-                    "words": []
-                }
-                continue
+                from gloss_generator import rule_based_gloss
+                safe_log(f"  Gloss generation exception for '{text}': {gloss_err}. Using rule_based_gloss fallback.")
+                gloss_text = rule_based_gloss(text)
                 
             gloss_words = gloss_text.split()
             block_words_data = []
@@ -282,6 +305,8 @@ def run_translation_pipeline(video_id: str, youtube_url: str):
             with ACTIVE_TASKS_LOCK:
                 task = ACTIVE_TASKS[video_id]
                 task["new_blocks_queue"].append(new_block_data)
+                if idx < len(task["caption_blocks"]):
+                    task["caption_blocks"][idx]["words"] = words_light
                 task["processed_indices"].append(idx)
                 task["unmatched_list"] = list(unmatched_set)
                 task["tier_info"] = tier_info_list
